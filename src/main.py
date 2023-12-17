@@ -39,16 +39,10 @@ ball_speed = [5, 5]
 frame_count = 0
 
 # 加载音乐
-pygame.mixer.music.load(audio_file)  # 替换为你自己的音乐文件路径
-pygame.mixer.music.play(-1)  # -1表示循环播放
+# pygame.mixer.music.load(audio_file)  # 替换为你自己的音乐文件路径
+# pygame.mixer.music.play(-1)  # -1表示循环播放
 
 
-def check_end_map():
-    if map_width+map_pos[0]<=win_width or map_height+map_pos[1]<=win_height:
-        return True
-    if map_pos[0]>0 or map_pos[1]>0:
-        return True
-    return False
 
 # 游戏循环
 while True:
@@ -74,23 +68,26 @@ while True:
 
 
     # 更新地图位置
-
+    # 左边
     if ball_pos[0] < win_width / 4:
         if not map_pos[0] > 0:
-            map_pos[0] += ball_speed[0]
-            ball_pos[0] += ball_speed[0]
+            map_pos[0] += 5
+            ball_pos[0] += 5
+    #右边
     elif ball_pos[0] > win_width * 3 / 4:
         if not map_width+map_pos[0]<win_width:
-            map_pos[0] -= ball_speed[0]
-            ball_pos[0] -= ball_speed[0]
+            map_pos[0] -= 5
+            ball_pos[0] += 5
+    #上边
     if ball_pos[1] < win_height / 4:
         if not map_pos[1]>0:
-            map_pos[1] += ball_speed[1]
-            ball_pos[1] += ball_speed[1]
+            map_pos[1] += 5
+            ball_pos[1] += 5
+    #下边
     elif ball_pos[1] > win_height * 3 / 4:
         if not  map_height+map_pos[1]<win_height:
-            map_pos[1] -= ball_speed[1]
-            ball_pos[1] -= ball_speed[1]
+            map_pos[1] -= 5
+            ball_pos[1] += 5
 
     # 检测小球是否碰到了地图边界
     if ball_pos[0] - ball_radius < map_pos[0] or ball_pos[0] + ball_radius > map_pos[0] + map_width:
@@ -115,8 +112,10 @@ while True:
 
     font = pygame.font.SysFont('Arial', 20)
     map_text = font.render('Map: ({}, {})'.format(map_pos[0], map_pos[1]), True, (0, 0, 0))
-    task_text = font.render('Ball: ({}, {})'.format(ball_pos[0], ball_pos[1]), True, (0, 0, 0))
+    ball_text = font.render('Ball: ({}, {})'.format(ball_pos[0], ball_pos[1]), True, (0, 0, 0))
+    ball_speed_text = font.render('BallSpeed: ({}, {})'.format(ball_speed[0], ball_speed[1]), True, (0, 0, 0))
     screen.blit(map_text, (10, 10))
-    screen.blit(task_text, (10, 30))
+    screen.blit(ball_text, (10, 30))
+    screen.blit(ball_speed_text, (10, 50))
     # 更新屏幕
     pygame.display.update()
