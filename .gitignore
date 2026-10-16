@@ -6,6 +6,8 @@ prototypes/web/node_modules/
 prototypes/web/dist/
 prototypes/rust/target/
 *.mp4
+*.m4a
+*.aac
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

@@ -41,6 +41,11 @@ class PipelineTest(unittest.TestCase):
         self.assertGreaterEqual(strong["f1"], 0.80)
         self.assertAlmostEqual(analysis.tempo, 126.0, delta=1.0)
 
+    def test_soft_mode_does_not_halve_a_clear_kick(self) -> None:
+        analysis = analyze(self.wav, Path(self.tmp.name), beat_mode="soft")
+        self.assertAlmostEqual(analysis.tempo, 126.0, delta=2.0)
+        self.assertGreaterEqual(len(analysis.beats), 50)
+
     def test_both_aspects_have_audio(self) -> None:
         for aspect, width, height in (("16:9", 1920, 1080), ("9:16", 1080, 1920)):
             output = Path(self.tmp.name) / f"{aspect.replace(':', 'x')}.mp4"

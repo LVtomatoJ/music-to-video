@@ -43,13 +43,19 @@ def decode_wav(source: Path, destination: Path, max_seconds: float | None) -> No
     subprocess.run(cmd, check=True)
 
 
-def analyze(source: Path, workdir: Path, max_seconds: float | None = None) -> Analysis:
+def analyze(source: Path, workdir: Path, max_seconds: float | None = None, beat_mode: str = "default") -> Analysis:
     """Decode `source` into `workdir` and return beat times in seconds.
 
     A beat is strong when its high-frequency onset strength is at least 1.35×
     the median strength of all detected beats. That is the same rule measured
     in the Python prototype.
+
+    `beat_mode="soft"` tries a half-time pulse when the tracker locks onto a
+    fast strum or hat pattern, and keeps it only when those slower hits land
+    on onsets at least as cleanly.
     """
+    if beat_mode not in {"default", "soft"}:
+        raise SystemExit(f"unknown beat mode {beat_mode}")
     wav_path = workdir / "analysis.wav"
     decode_wav(source, wav_path, max_seconds)
     y, sr = librosa.load(str(wav_path), sr=44100, mono=True)
@@ -57,6 +63,8 @@ def analyze(source: Path, workdir: Path, max_seconds: float | None = None) -> An
     tempo_f = float(np.atleast_1d(tempo)[0])
     beat_frames = np.asarray(beat_frames, dtype=int)
     times = [float(t) for t in librosa.frames_to_time(beat_frames, sr=sr, hop_length=HOP)]
+    if beat_mode == "soft":
+        tempo_f, beat_frames, times = _prefer_slower_pulse(y, int(sr), tempo_f, beat_frames, times)
     strong = _strong_beats(y, sr, beat_frames, times)
     rms_times, rms, bands, sections = _sections_and_bands(y, int(sr))
     return Analysis(
@@ -71,6 +79,47 @@ def analyze(source: Path, workdir: Path, max_seconds: float | None = None) -> An
         rms=tuple(rms),
         bands=tuple(tuple(row) for row in bands),
     )
+
+
+def _onset_contrast(y: np.ndarray, sr: int, beats: list[float]) -> float:
+    if len(beats) < 4:
+        return 0.0
+    onset = librosa.onset.onset_strength(y=y, sr=sr, hop_length=HOP)
+    grid = librosa.times_like(onset, sr=sr, hop_length=HOP)
+    values = [float(onset[int(np.argmin(np.abs(grid - beat)))]) for beat in beats]
+    between = []
+    for left, right in zip(beats, beats[1:]):
+        between.append(float(onset[int(np.argmin(np.abs(grid - (left + right) / 2.0)))]))
+    return float(np.mean(values) / (float(np.mean(between)) + 1e-9))
+
+
+def _prefer_slower_pulse(y: np.ndarray, sr: int, tempo: float, frames: np.ndarray, times: list[float]):
+    """Keep a half-time track when it matches onsets at least as well.
+
+    Songs with a soft kick and a busy guitar or hat often get a doubled
+    tempo. The slower grid is used only if the tracker actually slows down
+    and the hits are not weaker than the fast grid.
+    """
+    if tempo <= 120.0 or len(times) < 8:
+        return tempo, frames, times
+    full = _onset_contrast(y, sr, times)
+    half_tempo, half_frames = librosa.beat.beat_track(
+        y=y,
+        sr=sr,
+        hop_length=HOP,
+        start_bpm=float(tempo) / 2.0,
+        units="frames",
+    )
+    half_frames = np.asarray(half_frames, dtype=int)
+    half_times = [float(t) for t in librosa.frames_to_time(half_frames, sr=sr, hop_length=HOP)]
+    if len(half_times) < 4:
+        return tempo, frames, times
+    realized = 60.0 / float(np.median(np.diff(half_times)))
+    if realized >= tempo * 0.75:
+        return tempo, frames, times
+    if _onset_contrast(y, sr, half_times) + 1e-6 < full:
+        return tempo, frames, times
+    return float(np.atleast_1d(half_tempo)[0]), half_frames, half_times
 
 
 def _strong_beats(y: np.ndarray, sr: int, beat_frames: np.ndarray, times: list[float]) -> list[float]:

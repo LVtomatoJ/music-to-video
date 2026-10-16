@@ -34,6 +34,7 @@ music2video -i song.mp3 -o field.mp4 --scene balls
 | `--fps` | 默认 30 |
 | `--seed` | 地图走向和障碍种类的随机种子，默认 42 |
 | `--max-seconds` | 只处理歌曲开头的若干秒 |
+| `--beat-mode` | `default` 用 librosa 的节拍；`soft` 在更快的一倍速上，若半速网格的 onset 不更差，就改用半速。鼓点清楚的歌不会被改慢 |
 | `--crf` | x264 质量，默认 20 |
 | `--dump-beats` | 把节拍、段落和每个障碍写成 JSON |
 

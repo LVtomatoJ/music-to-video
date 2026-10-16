@@ -33,6 +33,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--crf", type=int, default=20)
     parser.add_argument("--max-seconds", type=float, default=None, help="trim the song before analysis")
+    parser.add_argument(
+        "--beat-mode",
+        choices=("default", "soft"),
+        default="default",
+        help="soft prefers a half-time pulse when it hits onsets at least as cleanly",
+    )
     parser.add_argument("--dump-beats", type=Path, default=None, help="write detected beats as JSON")
     return parser
 
@@ -57,7 +63,7 @@ def render_video(args: argparse.Namespace) -> dict:
         raise SystemExit("--fps must be positive")
     width, height = ASPECTS[args.aspect]
     with tempfile.TemporaryDirectory(prefix="music2video-") as tmp:
-        analysis = analyze(args.input, Path(tmp), max_seconds=args.max_seconds)
+        analysis = analyze(args.input, Path(tmp), max_seconds=args.max_seconds, beat_mode=args.beat_mode)
         scene = build_scene(args.scene, width, height, analysis, args.seed)
         renderer = CairoRenderer(width, height)
         encoder = FfmpegEncoder(args.output, width, height, args.fps, analysis.wav_path, crf=args.crf)
@@ -92,6 +98,7 @@ def render_video(args: argparse.Namespace) -> dict:
             "height": height,
             "fps": args.fps,
             "scene": args.scene,
+            "beat_mode": args.beat_mode,
             "output": str(args.output),
         }
         if timing:
