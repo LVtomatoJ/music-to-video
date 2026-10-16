@@ -12,10 +12,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from music2video.analysis import analyze  # noqa: E402
+import math  # noqa: E402
+
+from music2video.analysis import Analysis, Section, analyze  # noqa: E402
 from music2video.cli import main  # noqa: E402
 from music2video.mapscene import MapScene  # noqa: E402
-from music2video.registry import OBJECTS  # noqa: E402
+from music2video.themes import THEMES, pick_theme  # noqa: E402
 from tools.make_test_track import synthesize, write_wav  # noqa: E402
 from tools.score_beats import match_counts  # noqa: E402
 
@@ -85,32 +87,60 @@ class PipelineTest(unittest.TestCase):
 
     def test_map_hits_are_beat_accurate(self) -> None:
         analysis = analyze(self.wav, Path(self.tmp.name))
-        scene = MapScene.create(1920, 1080, analysis, seed=42)
+        scene = MapScene.create(1920, 1080, analysis, seed=42, theme="neon")
         timing = scene.timing
         self.assertEqual(timing["hits"], len(analysis.beats))
         self.assertLess(timing["max_position_error_px"], 1e-6)
         self.assertEqual(timing["max_timing_error_s"], 0.0)
         self.assertGreaterEqual(timing["min_clearance_px"], 72.0)
-        self.assertEqual(set(timing["kinds"]), set(OBJECTS))
+        self.assertEqual(set(timing["kinds"]), {"wall"})
 
-    def test_sections_pick_different_objects(self) -> None:
+    def test_themes_keep_their_own_objects_and_feel(self) -> None:
         analysis = analyze(self.wav, Path(self.tmp.name))
-        scene = MapScene.create(1920, 1080, analysis, seed=42)
-        calm = {"wall", "platform", "peg", "piano"}
-        intense = {"wall", "peg", "pad", "breakable", "spinner"}
-        calm_hits = [obs for obs in scene.obstacles if obs.section == "calm"]
-        intense_hits = [obs for obs in scene.obstacles if obs.section == "intense"]
-        self.assertGreaterEqual(len(calm_hits), 8)
-        self.assertGreaterEqual(len(intense_hits), 8)
-        calm_fit = sum(obs.kind in calm for obs in calm_hits) / len(calm_hits)
-        intense_fit = sum(obs.kind in intense for obs in intense_hits) / len(intense_hits)
-        self.assertGreaterEqual(calm_fit, 0.6)
-        self.assertGreaterEqual(intense_fit, 0.6)
-        other = MapScene.create(1920, 1080, analysis, seed=99)
-        self.assertNotEqual(
-            [obs.kind for obs in scene.obstacles],
-            [obs.kind for obs in other.obstacles],
+        projectiles = set()
+        feels = set()
+        for name, theme in THEMES.items():
+            scene = MapScene.create(1920, 1080, analysis, seed=42, theme=name)
+            kinds = set(scene.timing["kinds"])
+            self.assertTrue(kinds)
+            self.assertTrue(kinds <= set(theme.objects))
+            self.assertEqual(scene.skin.name, name)
+            self.assertEqual(scene.skin.projectile, theme.projectile)
+            self.assertEqual(scene.timing["max_timing_error_s"], 0.0)
+            self.assertLess(scene.timing["max_position_error_px"], 1e-6)
+            projectiles.add(theme.projectile)
+            feels.add((theme.feel.mass, theme.feel.stiffness, theme.feel.damping, theme.feel.trail, theme.projectile))
+            beat = scene.obstacles[0].hit_time
+            scene.update(1 / 30, beat, [(beat, scene.obstacles[0].strong)])
+            self.assertGreater(scene.squash, 0.05)
+            for step in range(24):
+                scene.update(1 / 30, beat + (step + 1) / 30, [])
+            self.assertTrue(math.isfinite(scene.squash))
+            self.assertLess(abs(scene.squash), 1.36)
+        self.assertEqual(len(projectiles), len(THEMES))
+        self.assertEqual(len(feels), len(THEMES))
+
+    def test_auto_theme_follows_energy(self) -> None:
+        calm = Analysis(
+            60.0,
+            [1.0, 2.0, 3.0],
+            [],
+            4.0,
+            44100,
+            Path("unused.wav"),
+            sections=(Section(0.0, 4.0, 0.12, "calm"),),
         )
+        hot = Analysis(
+            126.0,
+            [0.5, 1.0, 1.5, 2.0, 2.5, 3.0],
+            [0.5, 1.0, 1.5, 2.0, 2.5],
+            4.0,
+            44100,
+            Path("unused.wav"),
+            sections=(Section(0.0, 4.0, 0.55, "intense"),),
+        )
+        self.assertEqual(pick_theme(calm), "pastel")
+        self.assertEqual(pick_theme(hot), "shatter")
 
     def test_balls_scene_still_renders(self) -> None:
         output = Path(self.tmp.name) / "balls.mp4"

@@ -13,6 +13,7 @@ from music2video.analysis import analyze
 from music2video.encode import FfmpegEncoder
 from music2video.render import CairoRenderer
 from music2video.scene import build_scene
+from music2video.themes import THEMES, pick_theme
 
 ASPECTS = {
     "16:9": (1920, 1080),
@@ -39,6 +40,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="default",
         help="soft prefers a half-time pulse when it hits onsets at least as cleanly",
     )
+    parser.add_argument(
+        "--theme",
+        choices=tuple(THEMES) + ("auto",),
+        default="neon",
+        help="one visual skin for the whole video; auto picks from section energy",
+    )
     parser.add_argument("--dump-beats", type=Path, default=None, help="write detected beats as JSON")
     return parser
 
@@ -64,7 +71,8 @@ def render_video(args: argparse.Namespace) -> dict:
     width, height = ASPECTS[args.aspect]
     with tempfile.TemporaryDirectory(prefix="music2video-") as tmp:
         analysis = analyze(args.input, Path(tmp), max_seconds=args.max_seconds, beat_mode=args.beat_mode)
-        scene = build_scene(args.scene, width, height, analysis, args.seed)
+        theme = pick_theme(analysis) if args.theme == "auto" else args.theme
+        scene = build_scene(args.scene, width, height, analysis, args.seed, theme)
         renderer = CairoRenderer(width, height)
         encoder = FfmpegEncoder(args.output, width, height, args.fps, analysis.wav_path, crf=args.crf)
         flags = strong_flags(analysis.beats, analysis.strong_beats)
@@ -98,6 +106,7 @@ def render_video(args: argparse.Namespace) -> dict:
             "height": height,
             "fps": args.fps,
             "scene": args.scene,
+            "theme": getattr(getattr(scene, "skin", None), "name", args.theme),
             "beat_mode": args.beat_mode,
             "output": str(args.output),
         }
@@ -120,7 +129,7 @@ def render_video(args: argparse.Namespace) -> dict:
         )
     print(
         f"tempo {analysis.tempo:.2f} BPM, {len(analysis.beats)} beats, "
-        f"{len(analysis.strong_beats)} strong, scene {args.scene}{extra}, wrote {args.output}"
+        f"{len(analysis.strong_beats)} strong, scene {args.scene}, theme {payload['theme']}{extra}, wrote {args.output}"
     )
     return payload
 

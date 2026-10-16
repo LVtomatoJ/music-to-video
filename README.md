@@ -19,8 +19,9 @@ pip install -e .
 ## 用法
 
 ```bash
-music2video -i song.mp3 -o out.mp4 --aspect 16:9
-music2video -i song.mp3 -o story.mp4 --aspect 9:16 --seed 7
+music2video -i song.mp3 -o out.mp4 --aspect 16:9 --theme neon
+music2video -i song.mp3 -o soft.mp4 --theme pastel
+music2video -i song.mp3 -o story.mp4 --aspect 9:16 --theme auto --seed 7
 python -m music2video -i assets/test-track.wav -o out.mp4 --aspect 16:9
 music2video -i song.mp3 -o field.mp4 --scene balls
 ```
@@ -31,6 +32,7 @@ music2video -i song.mp3 -o field.mp4 --scene balls
 | `-o, --output` | 输出的 mp4 |
 | `--aspect` | `16:9` 为 1920×1080，`9:16` 为 1080×1920 |
 | `--scene` | `map`（默认）一颗球走生成的地图；`balls` 是原来的多球场地 |
+| `--theme` | 整支片子只用一种皮肤。`neon` 霓虹、`arcade` 街机、`piano` 琴键、`shatter` 冲击、`pastel` 柔彩。`auto` 按整首歌的能量选一种，不会中途混用 |
 | `--fps` | 默认 30 |
 | `--seed` | 地图走向和障碍种类的随机种子，默认 42 |
 | `--max-seconds` | 只处理歌曲开头的若干秒 |
@@ -38,17 +40,23 @@ music2video -i song.mp3 -o field.mp4 --scene balls
 | `--crf` | x264 质量，默认 20 |
 | `--dump-beats` | 把节拍、段落和每个障碍写成 JSON |
 
-默认画面是一张随歌曲长出来的地图：
+默认画面是一张随歌曲长出来的地图，整支片子只用一个主题。路径仍按拍点摆好，球心在拍上正好贴住表面。主题改的是撞上去的东西、以及这一下的手感，不是把所有障碍掺在一起。
 
-- 球以恒定速度走折线。每一拍的落点上放一个障碍，法线按入射方向和离开方向算好，所以球心在拍点上正好贴住表面。含拍的那一帧按拍点时刻来画，命中误差是 0。
-- 障碍按段落挑选。分析把歌曲切成 2 秒一段，用 RMS 标成 calm / mid / intense。平静段多用墙、平台、圆桩和钢琴键；激烈段多用弹垫、碎块、转杆和圆桩。强拍用更大的障碍。
-- 撞上之后障碍留在地图上并发光。镜头跟着球走，后面的路是事后才留下来的。
-- 撞击效果放在注册表里：冲击波、火花、碎块、光晕、色差闪、球的挤压拉伸、颜色和形状变化。强拍再加屏幕震动。平静段的效果更轻。
-- 背景跟着能量走：视差星点和格子、径向脉冲，以及画面底部的频谱条。配色随段落切换。
+| 主题 | 飞行物 | 手感 | 障碍 | 撞击 |
+| --- | --- | --- | --- | --- |
+| `neon` 霓虹 | 霓虹箭头 | 轻、回弹快，几乎不变形 | 只有墙 | 冲击波环 |
+| `arcade` 街机 | 金属弹珠 | 挤压利落，马上弹开 | 圆桩、弹垫、转杆 | 火花 |
+| `piano` 琴键 | 音符 | 先拉长再收回 | 钢琴键、平台 | 柔光 |
+| `shatter` 冲击 | 会翻滚的橡胶方块 | 重，撞上停一停再慢慢复原 | 碎块、墙 | 碎片和屏幕震动 |
+| `pastel` 柔彩 | 肥皂泡 | 慢、飘，挤压很轻 | 墙、平台 | 柔光 |
+
+手感写在主题的 `Feel` 里：质量、挤压幅度、拉伸、弹簧劲度、阻尼、停顿、拖尾。这些只改变变形，不改拍点。柔和的歌可以用 `--theme pastel`，或者 `--theme auto` 让能量偏低的歌自己落到柔彩或琴键。
+
+撞过的障碍留在地图上。镜头跟着飞行物走。
 
 `--scene balls` 保留原来的多球场地：每拍反向并换色，强拍爆粒子。
 
-加一种障碍或撞击效果：在 `music2video/registry.py` 里调用 `register_object` / `register_effect`。对象声明自己出现在哪些段落、命中时触发哪些效果，以及一个 draw 函数。分析、场景、绘制、编码互不调用。
+加一种障碍或撞击效果：在 `music2video/registry.py` 里调用 `register_object` / `register_effect`。加一种皮肤：在 `music2video/themes.py` 里 `register_theme`，写上飞行物、`Feel`、障碍和效果。分析、场景、绘制、编码互不调用。
 
 合成测试曲（126 BPM，节拍时间已知）：
 

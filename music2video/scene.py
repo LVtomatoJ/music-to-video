@@ -197,11 +197,11 @@ class Scene:
         self.particles = alive
 
 
-def build_scene(kind: str, width: int, height: int, analysis, seed: int):
+def build_scene(kind: str, width: int, height: int, analysis, seed: int, theme: str = "neon"):
     if kind == "balls":
         return Scene.create(width, height, seed=seed)
     if kind == "map":
         from music2video.mapscene import MapScene
 
-        return MapScene.create(width, height, analysis, seed)
+        return MapScene.create(width, height, analysis, seed, theme)
     raise SystemExit(f"unknown scene {kind}")

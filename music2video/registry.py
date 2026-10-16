@@ -34,6 +34,8 @@ class Obstacle:
     spin: float
     peg_r: float
     kind_hue: float
+    sat: float = 0.72
+    light: float = 0.42
     lit: bool = False
     broken: bool = False
     flash: float = 0.0
@@ -75,7 +77,12 @@ def _place(ctx, obs: Obstacle) -> None:
 
 
 def _color(hue: float, sat: float, light: float, flash: float) -> tuple[float, float, float]:
-    return hsl_to_rgb(hue, sat, min(0.92, light + 0.35 * flash))
+    return hsl_to_rgb(hue, sat, min(0.94, light + 0.28 * flash))
+
+
+def _body(obs: Obstacle, hue: float, lit: bool) -> tuple[float, float, float]:
+    light = obs.light if lit else obs.light * 0.72
+    return _color(hue, obs.sat, light, obs.flash)
 
 
 def draw_wall(ctx, obs: Obstacle, time: float, alpha: float, hue: float) -> None:
@@ -86,7 +93,7 @@ def draw_wall(ctx, obs: Obstacle, time: float, alpha: float, hue: float) -> None
     thick = 16 + (8 if obs.strong else 0)
     ctx.save()
     _place(ctx, obs)
-    red, green, blue = _color(hue, 0.72, 0.42 if obs.lit else 0.28, obs.flash)
+    red, green, blue = _body(obs, hue, obs.lit)
     ctx.set_source_rgba(red, green, blue, alpha)
     ctx.rectangle(0, -length / 2, thick, length)
     ctx.fill()
@@ -106,7 +113,7 @@ def draw_platform(ctx, obs: Obstacle, time: float, alpha: float, hue: float) -> 
     thick = 22
     ctx.save()
     _place(ctx, obs)
-    red, green, blue = _color(hue, 0.55, 0.42 if obs.lit else 0.28, obs.flash)
+    red, green, blue = _body(obs, hue, obs.lit)
     ctx.set_source_rgba(red, green, blue, alpha)
     ctx.rectangle(0, -length / 2, thick, length)
     ctx.fill()
@@ -127,7 +134,7 @@ def draw_peg(ctx, obs: Obstacle, time: float, alpha: float, hue: float) -> None:
         return
     cx = obs.x + obs.nx * (BALL_R + obs.peg_r)
     cy = obs.y + obs.ny * (BALL_R + obs.peg_r)
-    red, green, blue = _color(hue, 0.8, 0.55 if obs.lit else 0.34, obs.flash)
+    red, green, blue = _body(obs, hue, obs.lit)
     ctx.set_source_rgba(red, green, blue, alpha)
     ctx.arc(cx, cy, obs.peg_r, 0, math.tau)
     ctx.fill()
@@ -149,7 +156,7 @@ def draw_pad(ctx, obs: Obstacle, time: float, alpha: float, hue: float) -> None:
     thick = 28 + (10 if obs.strong else 0)
     ctx.save()
     _place(ctx, obs)
-    red, green, blue = _color(hue, 0.85, 0.55 if obs.lit else 0.36, obs.flash)
+    red, green, blue = _body(obs, hue, obs.lit)
     ctx.set_source_rgba(red, green, blue, alpha)
     ctx.set_line_width(thick)
     ctx.set_line_cap(1)
@@ -173,12 +180,12 @@ def draw_breakable(ctx, obs: Obstacle, time: float, alpha: float, hue: float) ->
     ctx.save()
     _place(ctx, obs)
     if obs.broken:
-        red, green, blue = _color(hue, 0.6, 0.5, obs.flash)
+        red, green, blue = _body(obs, hue, True)
         ctx.set_source_rgba(red, green, blue, alpha * 0.35)
         ctx.arc(side * 0.4, 0, side * 0.45, 0, math.tau)
         ctx.fill()
     else:
-        red, green, blue = _color(hue, 0.7, 0.46 if obs.lit else 0.32, obs.flash)
+        red, green, blue = _body(obs, hue, obs.lit)
         ctx.set_source_rgba(red, green, blue, alpha)
         ctx.rectangle(0, -side / 2, side, side)
         ctx.fill()
@@ -204,7 +211,7 @@ def draw_spinner(ctx, obs: Obstacle, time: float, alpha: float, hue: float) -> N
     ctx.save()
     ctx.translate(cx, cy)
     ctx.rotate(angle)
-    red, green, blue = _color(hue, 0.75, 0.52 if obs.lit else 0.34, obs.flash)
+    red, green, blue = _body(obs, hue, obs.lit)
     ctx.set_source_rgba(red, green, blue, alpha)
     ctx.rectangle(-length / 2, -thick, length, thick)
     ctx.fill()
@@ -231,7 +238,7 @@ def draw_piano(ctx, obs: Obstacle, time: float, alpha: float, hue: float) -> Non
         local_y = index * (key_w + gap)
         center = index == 0
         if center and obs.lit:
-            red, green, blue = _color(hue, 0.75, 0.62, obs.flash)
+            red, green, blue = _body(obs, hue, True)
         else:
             light = 0.9 if not center else 0.72
             red, green, blue = (light, light, light * 0.96)

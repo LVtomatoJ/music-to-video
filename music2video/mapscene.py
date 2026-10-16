@@ -6,8 +6,9 @@ import math
 from dataclasses import dataclass
 
 from music2video.analysis import Analysis, section_at
-from music2video.registry import BALL_R, EFFECTS, OBJECTS, Obstacle
+from music2video.registry import BALL_R, EFFECTS, Obstacle
 from music2video.scene import xorshift32
+from music2video.themes import THEMES, Theme, pick_theme
 
 SPEED = 680.0
 SPREAD = 0.58
@@ -124,19 +125,29 @@ class MapScene:
         self.hue_jump = 0.0
         self.theme_hue = 190.0
         self.bg_flash = 0.0
+        self.squash_v = 0.0
+        self.hold = 0.0
+        self.spin = 0.0
+        self.spin_v = 0.0
+        self.skin: Theme | None = None
         self.ball_r = BALL_R
         self.analysis: Analysis | None = None
         self.timing: dict = {}
         self.duration = 0.0
 
     @classmethod
-    def create(cls, width: int, height: int, analysis: Analysis, seed: int = 42) -> MapScene:
+    def create(cls, width: int, height: int, analysis: Analysis, seed: int = 42, theme: str = "neon") -> MapScene:
         scene = cls()
         scene.width = float(width)
         scene.height = float(height)
         scene.analysis = analysis
         scene.duration = analysis.duration
         scene.rng = [seed & 0xFFFFFFFF or 1]
+        name = pick_theme(analysis) if theme == "auto" else theme
+        if name not in THEMES:
+            raise SystemExit(f"unknown theme {theme}")
+        scene.skin = THEMES[name]
+        scene.theme_hue = scene.skin.hue
         flags = []
         si = 0
         strong_list = list(analysis.strong_beats)
@@ -179,7 +190,7 @@ class MapScene:
             ivx, ivy = _unit(math.cos(heading), math.sin(heading))
             dist = SPEED * deduped[0][0]
             pos = (-ivx * dist, -ivy * dist)
-        counts = {name: 0 for name in OBJECTS}
+        counts = {name: 0 for name in self.skin.objects}
         last_kind = ""
         polys: list[tuple[tuple[float, float], tuple[float, float]]] = []
         for index, (beat, is_strong) in enumerate(deduped):
@@ -209,11 +220,12 @@ class MapScene:
             nx, ny = _unit(ivx - ovx, ivy - ovy)
             tx, ty = -ny, nx
             section = section_at(self.analysis.sections if self.analysis else (), beat)
-            kind = _choose_kind(section.label, is_strong, counts, last_kind, self.rng)
+            kind = _choose_kind(self.skin.objects, is_strong, counts, last_kind, self.rng)
             counts[kind] += 1
             last_kind = kind
             scale = min(1.0, length / 280.0)
-            size, peg_r, spin, kind_hue = _object_dims(kind, is_strong, section.energy, scale, self.rng)
+            size, peg_r, spin, _ignored = _object_dims(kind, is_strong, section.energy, scale, self.rng)
+            kind_hue = self.skin.hue_step * self.skin.objects.index(kind)
             self.obstacles.append(
                 Obstacle(
                     kind=kind,
@@ -231,6 +243,8 @@ class MapScene:
                     spin=spin,
                     peg_r=peg_r,
                     kind_hue=kind_hue,
+                    sat=self.skin.object_sat,
+                    light=self.skin.object_light,
                 )
             )
             self.segments.append(Segment(t_prev, beat, pos[0], pos[1], hit[0], hit[1]))
@@ -278,26 +292,44 @@ class MapScene:
         self.time = time
         self.pos = self.position_at(time)
         self.trail.append(self.pos)
-        if len(self.trail) > 26:
-            del self.trail[:-26]
+        trail_keep = self.skin.feel.trail_length if self.skin else 16
+        if len(self.trail) > trail_keep:
+            del self.trail[:-trail_keep]
         vx, vy = self.velocity_at(time)
         self.cam_x = self.pos[0] + vx * 0.045
         self.cam_y = self.pos[1] + vy * 0.045
-        target = _theme_hue(time, self.analysis, self.duration)
-        self.theme_hue += (target - self.theme_hue) * (1.0 - math.exp(-3.2 * dt))
+        if self.skin is not None:
+            self.theme_hue = self.skin.hue
         self._integrate(dt)
         self.bg_flash = max(self.bg_flash, 0.0)
 
     def _decay(self, dt: float) -> None:
         fade = math.exp(-8.0 * dt)
         self.shake *= math.exp(-6.5 * dt)
-        self.squash *= math.exp(-7.0 * dt)
+        self._spring(dt)
         self.chroma *= math.exp(-5.0 * dt)
         self.morph *= math.exp(-3.5 * dt)
         self.hue_jump *= math.exp(-4.5 * dt)
         self.bg_flash *= fade
         for obs in self.obstacles:
             obs.flash *= fade
+
+    def _spring(self, dt: float) -> None:
+        """Deformation spring. The center stays on the planned path."""
+        if self.skin is None:
+            self.squash *= math.exp(-7.0 * dt)
+            return
+        feel = self.skin.feel
+        if self.hold > 0.0:
+            self.hold = max(0.0, self.hold - dt)
+        else:
+            force = -feel.stiffness * self.squash - feel.damping * self.squash_v
+            self.squash_v += force / max(0.05, feel.mass) * dt
+            self.squash_v = max(-8.0, min(8.0, self.squash_v))
+            self.squash += self.squash_v * dt
+            self.squash = max(-0.55, min(1.35, self.squash))
+        self.spin += self.spin_v * dt
+        self.spin_v *= math.exp(-5.5 * dt)
 
     def _trigger(self, beat_time: float) -> None:
         obs = None
@@ -309,12 +341,20 @@ class MapScene:
             return
         obs.lit = True
         obs.flash = 1.0
-        self.bg_flash = 1.0
-        # Calm stretches stay small; intense stretches spend the whole effect budget.
-        section_boost = {"calm": 0.12, "mid": 0.42, "intense": 0.78}[obs.section]
-        intensity = min(1.0, section_boost + 0.3 * obs.energy + (0.28 if obs.strong else 0.0))
-        kind = OBJECTS[obs.kind]
-        for name in kind.effects:
+        feel = self.skin.feel
+        self.bg_flash = feel.pause + 0.35
+        weight = 0.7 + 0.3 * obs.energy + (0.15 if obs.strong else 0.0)
+        intensity = min(1.0, self.skin.intensity * weight)
+        self.squash = feel.squash * (0.85 + 0.15 * weight)
+        self.squash_v = 0.0
+        self.hold = feel.pause * (1.2 if obs.strong else 1.0)
+        self.squash_nx, self.squash_ny = obs.nx, obs.ny
+        if obs.strong and feel.shake > 0:
+            self.bump_shake(feel.shake * intensity)
+        if feel.tumble:
+            direction = 1.0 if xorshift32(self.rng) < 0.5 else -1.0
+            self.spin_v += feel.tumble * direction * (1.0 if obs.strong else 0.45)
+        for name in self.skin.effects:
             EFFECTS[name](self, obs, intensity, self.rng)
 
     def add_ring(self, x: float, y: float, growth: float, hue: float, width: float) -> None:
@@ -474,30 +514,18 @@ def _blocked(a, b, polys) -> bool:
     return False
 
 
-def _choose_kind(label: str, strong: bool, counts: dict[str, int], last: str, rng: list[int]) -> str:
-    """Pick from the section's object pool, and prefer unused members of that pool.
-
-    Strong beats lean toward the heavier objects the section allows. A rare
-    guest from outside the pool keeps a short song from hiding a type entirely.
-    """
-    preferred = [name for name, kind in OBJECTS.items() if label in kind.sections]
-    if not preferred:
-        preferred = list(OBJECTS)
-    pool = preferred
+def _choose_kind(pool: tuple[str, ...], strong: bool, counts: dict[str, int], last: str, rng: list[int]) -> str:
+    """Stay inside the theme. Strong hits lean toward the heavier object in that set."""
+    options = list(pool)
     if strong:
-        juicy = [name for name in preferred if name in {"breakable", "pad", "spinner", "peg", "wall"}]
-        if juicy:
-            pool = juicy
-    if xorshift32(rng) < 0.12:
-        guests = [name for name in OBJECTS if name not in pool]
-        if guests:
-            pool = guests
-    least = min(pool, key=lambda name: (counts[name], name == last))
-    if counts[least] == 0 or counts[least] + 1 < max(counts[name] for name in pool):
-        if xorshift32(rng) < 0.7:
-            return least
-    options = [name for name in pool if name != last] or pool
-    return options[int(xorshift32(rng) * len(options)) % len(options)]
+        heavy = [name for name in options if name in {"breakable", "pad", "spinner", "wall"}]
+        if heavy and xorshift32(rng) < 0.7:
+            options = heavy
+    least = min(options, key=lambda name: (counts[name], name == last))
+    if counts[least] == 0 or xorshift32(rng) < 0.6:
+        return least
+    rest = [name for name in options if name != last] or options
+    return rest[int(xorshift32(rng) * len(rest)) % len(rest)]
 
 
 def _object_dims(kind: str, strong: bool, energy: float, scale: float, rng: list[int]) -> tuple[float, float, float, float]:
@@ -528,13 +556,6 @@ def _object_dims(kind: str, strong: bool, energy: float, scale: float, rng: list
     if kind == "spinner":
         spin = (1.6 + xorshift32(rng) * 1.4) * (1 if xorshift32(rng) < 0.5 else -1)
     return size, peg_r, spin, hues[kind]
-
-
-def _theme_hue(time: float, analysis: Analysis | None, duration: float) -> float:
-    section = section_at(analysis.sections if analysis else (), time)
-    base = {"calm": 188.0, "mid": 36.0, "intense": 328.0}[section.label]
-    drift = 0.0 if duration <= 0 else (time / duration) * 90.0
-    return base + drift
 
 
 def _stars(rng: list[int], segments: list[Segment]) -> list[tuple[float, float]]:
