@@ -211,12 +211,10 @@ class MapScene:
                 next_spread = 0.12
                 next_side = side
             ovx, ovy = _unit(math.cos(next_lane + next_side * next_spread), math.sin(next_lane + next_side * next_spread))
-            # If this candidate segment crosses the path, soften the corner and try again.
-            hit, ivx, ivy, ovx, ovy, heading_fix = _avoid_overlap(
-                pos, hit, (ivx, ivy), (ovx, ovy), polys, length
-            )
-            if heading_fix is not None:
-                ovx, ovy = heading_fix
+            # Steer around a clash by rotating the whole bounce. The departure
+            # stays the reflection of the arrival, so the next segment cannot
+            # leave at an unrelated angle.
+            hit, ivx, ivy, ovx, ovy = _avoid_overlap(pos, hit, (ivx, ivy), (ovx, ovy), polys, length)
             nx, ny = _unit(ivx - ovx, ivy - ovy)
             tx, ty = -ny, nx
             section = section_at(self.analysis.sections if self.analysis else (), beat)
@@ -260,6 +258,10 @@ class MapScene:
             self.segments.append(
                 Segment(t_prev, self.duration, pos[0], pos[1], pos[0] + ivx * dist, pos[1] + ivy * dist)
             )
+        # The next corner may still yaw the departure. Rebuild every normal
+        # from the two segments that actually meet, which is the direction
+        # that reflects the arrival into that departure.
+        _align_bounce_normals(self.obstacles, self.segments)
 
     def position_at(self, time: float) -> tuple[float, float]:
         if not self.segments:
@@ -296,8 +298,12 @@ class MapScene:
         if len(self.trail) > trail_keep:
             del self.trail[:-trail_keep]
         vx, vy = self.velocity_at(time)
-        self.cam_x = self.pos[0] + vx * 0.045
-        self.cam_y = self.pos[1] + vy * 0.045
+        # Ease the camera. A hard velocity jump at a bounce must not yank the frame.
+        target_x = self.pos[0] + vx * 0.02
+        target_y = self.pos[1] + vy * 0.02
+        blend = 1.0 - math.exp(-10.0 * dt)
+        self.cam_x += (target_x - self.cam_x) * blend
+        self.cam_y += (target_y - self.cam_y) * blend
         if self.skin is not None:
             self.theme_hue = self.skin.hue
         self._integrate(dt)
@@ -305,7 +311,7 @@ class MapScene:
 
     def _decay(self, dt: float) -> None:
         fade = math.exp(-8.0 * dt)
-        self.shake *= math.exp(-6.5 * dt)
+        self.shake *= math.exp(-14.0 * dt)
         self._spring(dt)
         self.chroma *= math.exp(-5.0 * dt)
         self.morph *= math.exp(-3.5 * dt)
@@ -315,18 +321,24 @@ class MapScene:
             obs.flash *= fade
 
     def _spring(self, dt: float) -> None:
-        """Deformation spring. The center stays on the planned path."""
+        """Deformation spring. The center stays on the planned path.
+
+        The step is the closed-form damped oscillator. A forward Euler step
+        of the stiff themes (neon, arcade) flipped the squash every frame,
+        and the sprite then snapped between the wall normal and the flight
+        tangent between hits.
+        """
         if self.skin is None:
             self.squash *= math.exp(-7.0 * dt)
             return
         feel = self.skin.feel
         if self.hold > 0.0:
             self.hold = max(0.0, self.hold - dt)
-        else:
-            force = -feel.stiffness * self.squash - feel.damping * self.squash_v
-            self.squash_v += force / max(0.05, feel.mass) * dt
-            self.squash_v = max(-8.0, min(8.0, self.squash_v))
-            self.squash += self.squash_v * dt
+            self.squash_v = 0.0
+        elif dt > 0.0:
+            self.squash, self.squash_v = _damped_step(
+                self.squash, self.squash_v, feel.stiffness, feel.damping, max(0.05, feel.mass), dt
+            )
             self.squash = max(-0.55, min(1.35, self.squash))
         self.spin += self.spin_v * dt
         self.spin_v *= math.exp(-5.5 * dt)
@@ -465,7 +477,7 @@ class MapScene:
     def shake_offset(self) -> tuple[float, float]:
         if self.shake < 0.2:
             return 0.0, 0.0
-        return math.sin(self.time * 57.0) * self.shake, math.cos(self.time * 43.0) * self.shake * 0.65
+        return math.sin(self.time * 18.0) * self.shake, math.cos(self.time * 15.0) * self.shake * 0.55
 
 
 def _gap(scene: MapScene, obs: Obstacle, time: float) -> float:
@@ -479,30 +491,88 @@ def _gap(scene: MapScene, obs: Obstacle, time: float) -> float:
     return abs(signed + BALL_R)
 
 
+def _damped_step(x: float, v: float, stiffness: float, damping: float, mass: float, dt: float) -> tuple[float, float]:
+    """Exact step of x'' + (c/m) x' + (k/m) x = 0."""
+    omega = math.sqrt(stiffness / mass)
+    if omega < 1e-8:
+        return x, 0.0
+    zeta = damping / (2.0 * math.sqrt(stiffness * mass))
+    if zeta > 1.0001:
+        disc = math.sqrt(zeta * zeta - 1.0)
+        r1 = omega * (-zeta + disc)
+        r2 = omega * (-zeta - disc)
+        growth_a = math.exp(r1 * dt)
+        growth_b = math.exp(r2 * dt)
+        coeff_a = (v - r2 * x) / (r1 - r2)
+        coeff_b = x - coeff_a
+        position = coeff_a * growth_a + coeff_b * growth_b
+        velocity = coeff_a * r1 * growth_a + coeff_b * r2 * growth_b
+    elif zeta < 0.999:
+        damped = omega * math.sqrt(max(0.0, 1.0 - zeta * zeta))
+        decay = math.exp(-zeta * omega * dt)
+        cosine, sine = math.cos(damped * dt), math.sin(damped * dt)
+        coeff_b = (v + zeta * omega * x) / damped
+        position = decay * (x * cosine + coeff_b * sine)
+        velocity = -zeta * omega * position + decay * damped * (-x * sine + coeff_b * cosine)
+    else:
+        decay = math.exp(-omega * dt)
+        coeff_b = v + omega * x
+        position = (x + coeff_b * dt) * decay
+        velocity = coeff_b * decay - omega * position
+    return position, velocity
+
+
+def _reflect(ix: float, iy: float, nx: float, ny: float) -> tuple[float, float]:
+    dot = ix * nx + iy * ny
+    return _unit(ix - 2.0 * dot * nx, iy - 2.0 * dot * ny)
+
+
 def _avoid_overlap(pos, hit, incoming, outgoing, polys, length):
-    a = pos
-    b = hit
-    if not _blocked(a, b, polys):
-        return hit, incoming[0], incoming[1], outgoing[0], outgoing[1], None
-    # Push the hit sideways in steps until the segment is clear. The arrival
-    # time stays on the beat; only the direction bends.
+    """Yaw the whole corner until this arrival is clear.
+
+    Incoming and outgoing rotate together, so the bounce angle is unchanged.
+    A one-sided bend used to mirror across the old normal and cancel the
+    turn, which made the next segment wander.
+    """
     ix, iy = incoming
-    tx, ty = -iy, ix
     ox, oy = outgoing
+    if not _blocked(pos, hit, polys):
+        return hit, ix, iy, ox, oy
+    for degrees in (12, -12, 22, -22, 34, -34, 48, -48, 66, -66, 84, -84):
+        rad = math.radians(degrees)
+        cosine, sine = math.cos(rad), math.sin(rad)
+        ux, uy = ix * cosine - iy * sine, ix * sine + iy * cosine
+        vx, vy = ox * cosine - oy * sine, ox * sine + oy * cosine
+        candidate = (pos[0] + ux * length, pos[1] + uy * length)
+        if not _blocked(pos, candidate, polys):
+            return candidate, ux, uy, vx, vy
+    # Last resort: bend the arrival and reflect it, still a real bounce.
+    nx, ny = _unit(ix - ox, iy - oy)
+    tx, ty = -iy, ix
     for scale in (0.45, 0.9, -0.45, -0.9, 1.4, -1.4, 2.0, -2.0):
         ux, uy = _unit(ix + tx * scale, iy + ty * scale)
         candidate = (pos[0] + ux * length, pos[1] + uy * length)
         if not _blocked(pos, candidate, polys):
-            return candidate, ux, uy, ox, oy, None
-    # Last resort: leave along the bent heading so the next segment does not
-    # walk straight back into the map. The hit time is unchanged.
-    for scale in (1.2, -1.2, 2.2, -2.2):
-        ux, uy = _unit(ix + tx * scale, iy + ty * scale)
-        candidate = (pos[0] + ux * length, pos[1] + uy * length)
-        leave = _unit(ox + tx * scale * 0.35, oy + ty * scale * 0.35)
-        if not _blocked(pos, candidate, polys):
-            return candidate, ux, uy, leave[0], leave[1], (leave[0], leave[1])
-    return hit, ix, iy, ox, oy, None
+            vx, vy = _reflect(ux, uy, nx, ny)
+            return candidate, ux, uy, vx, vy
+    return hit, ix, iy, ox, oy
+
+
+def _align_bounce_normals(obstacles, segments) -> None:
+    """Make each surface the reflection normal of the flown corner."""
+    for index, obs in enumerate(obstacles):
+        if index + 1 >= len(segments):
+            continue
+        arrived = segments[index]
+        left = segments[index + 1]
+        ix, iy = _unit(arrived.x1 - arrived.x0, arrived.y1 - arrived.y0)
+        ox, oy = _unit(left.x1 - left.x0, left.y1 - left.y0)
+        dx, dy = ix - ox, iy - oy
+        if math.hypot(dx, dy) < 1e-6:
+            continue
+        nx, ny = _unit(dx, dy)
+        obs.nx, obs.ny = nx, ny
+        obs.tx, obs.ty = -ny, nx
 
 
 def _blocked(a, b, polys) -> bool:

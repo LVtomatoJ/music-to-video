@@ -212,19 +212,17 @@ class CairoRenderer:
             squash_gain = 0.35 + 0.55 * feel.squash
             stretch = feel.stretch
         squash = scene.squash
-        sx = max(0.34, min(1.45, 1.0 - squash_gain * squash))
-        sy = max(0.45, min(1.7, 1.0 + stretch * squash))
+        sx = max(0.55, min(1.25, 1.0 - squash_gain * squash))
+        sy = max(0.7, min(1.45, 1.0 + stretch * squash * 0.45))
         vx, vy = scene.velocity_at(scene.time)
-        if abs(squash) > 0.08:
-            angle = math.atan2(scene.squash_ny, scene.squash_nx)
-        else:
-            angle = math.atan2(vy, vx)
+        # Face the segment tangent the whole way between hits. The squash
+        # spring used to swap this for the wall normal and shove the sprite
+        # off the line every time it crossed a threshold.
+        angle = math.atan2(vy, vx)
         kind = scene.skin.projectile if scene.skin is not None else "bubble"
         ctx.save()
         ctx.translate(*scene.pos)
         ctx.rotate(angle)
-        # Keep the leading face on the contact point while the body deforms.
-        ctx.translate(BALL_R * (1.0 - sx), 0)
         ctx.scale(sx, sy)
         _PROJECTILES[kind](ctx, scene)
         ctx.restore()
@@ -246,35 +244,22 @@ def _draw_trail(ctx, scene) -> None:
     if style == "none" or len(scene.trail) < 2:
         return
     hue = scene.theme_hue
-    red, green, blue = hsl_to_rgb(hue, 0.65, 0.68)
-    if style == "streak":
-        ctx.set_source_rgba(red, green, blue, 0.75)
-        ctx.set_line_width(4)
-        ctx.move_to(*scene.trail[0])
-        for point in scene.trail[1:]:
-            ctx.line_to(*point)
+    red, green, blue = hsl_to_rgb(hue, 0.55, 0.72)
+    ctx.set_line_cap(1)
+    ctx.set_line_join(1)
+    # One fading stroke along the path. Filled copies of the flyer read as flicker.
+    points = scene.trail
+    for index in range(1, len(points)):
+        k = index / (len(points) - 1)
+        ctx.set_source_rgba(red, green, blue, 0.05 + 0.4 * k)
+        ctx.set_line_width(2.0 + 3.0 * k)
+        ctx.move_to(*points[index - 1])
+        ctx.line_to(*points[index])
         ctx.stroke()
-        return
-    for index, (x, y) in enumerate(scene.trail):
-        k = (index + 1) / len(scene.trail)
-        if style == "bubbles":
-            ctx.set_source_rgba(1, 1, 1, 0.08 + 0.22 * k)
-            ctx.set_line_width(2)
-            ctx.arc(x, y, BALL_R * (0.35 + 0.45 * k), 0, math.tau)
-            ctx.stroke()
-        elif style == "afterimage":
-            ctx.set_source_rgba(red, green, blue, 0.08 + 0.35 * k)
-            ctx.arc(x, y, BALL_R * 0.72 * k, 0, math.tau)
-            ctx.fill()
-        else:
-            ctx.set_source_rgba(red, green, blue, 0.05 + 0.22 * k)
-            ctx.arc(x, y, BALL_R * (0.22 + 0.5 * k), 0, math.tau)
-            ctx.fill()
 
 
 def _paint_bubble(ctx, scene) -> None:
-    wobble = 1.0 + 0.045 * math.sin(scene.time * 2.6)
-    radius = BALL_R * wobble
+    radius = BALL_R
     red, green, blue = hsl_to_rgb(scene.theme_hue, 0.25, 0.82)
     ctx.set_source_rgba(red, green, blue, 0.38)
     ctx.arc(0, 0, radius, 0, math.tau)

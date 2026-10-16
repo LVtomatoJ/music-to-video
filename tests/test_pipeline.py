@@ -16,7 +16,7 @@ import math  # noqa: E402
 
 from music2video.analysis import Analysis, Section, analyze  # noqa: E402
 from music2video.cli import main  # noqa: E402
-from music2video.mapscene import MapScene  # noqa: E402
+from music2video.mapscene import SPEED, MapScene, _reflect, _unit  # noqa: E402
 from music2video.themes import THEMES, pick_theme  # noqa: E402
 from tools.make_test_track import synthesize, write_wav  # noqa: E402
 from tools.score_beats import match_counts  # noqa: E402
@@ -95,6 +95,37 @@ class PipelineTest(unittest.TestCase):
         self.assertGreaterEqual(timing["min_clearance_px"], 72.0)
         self.assertEqual(set(timing["kinds"]), {"wall"})
 
+    def test_segments_stay_straight_and_bounces_reflect(self) -> None:
+        analysis = analyze(self.wav, Path(self.tmp.name))
+        for seed in (1, 42, 99):
+            scene = MapScene.create(1920, 1080, analysis, seed=seed, theme="neon")
+            self.assertGreaterEqual(scene.timing["min_clearance_px"], 72.0)
+            self.assertEqual(scene.timing["max_timing_error_s"], 0.0)
+            self.assertEqual(len(scene.segments), len(scene.obstacles) + 1)
+            for index, obs in enumerate(scene.obstacles):
+                arrived = scene.segments[index]
+                left = scene.segments[index + 1]
+                ix, iy = _unit(arrived.x1 - arrived.x0, arrived.y1 - arrived.y0)
+                ox, oy = _unit(left.x1 - left.x0, left.y1 - left.y0)
+                rx, ry = _reflect(ix, iy, obs.nx, obs.ny)
+                self.assertGreater(ix * obs.nx + iy * obs.ny, 0.0, f"seed {seed} hit {index} does not approach")
+                self.assertLess(ox * obs.nx + oy * obs.ny, 0.0, f"seed {seed} hit {index} does not leave")
+                self.assertGreater(rx * ox + ry * oy, 0.999, f"seed {seed} hit {index} reflection")
+                span = arrived.t1 - arrived.t0
+                vx, vy = arrived.x1 - arrived.x0, arrived.y1 - arrived.y0
+                length = math.hypot(vx, vy)
+                angles = []
+                for step in range(1, 6):
+                    t = arrived.t0 + span * step / 6.0
+                    px, py = scene.position_at(t)
+                    cross = abs((px - arrived.x0) * vy - (py - arrived.y0) * vx)
+                    self.assertLess(cross / length, 1e-6)
+                    self.assertGreater((px - arrived.x0) * ix + (py - arrived.y0) * iy, 0.0)
+                    vel = scene.velocity_at(t)
+                    angles.append(math.atan2(vel[1], vel[0]))
+                    self.assertGreater(vel[0] * ix + vel[1] * iy, SPEED * 0.99)
+                self.assertLess(max(angles) - min(angles), 1e-9)
+
     def test_themes_keep_their_own_objects_and_feel(self) -> None:
         analysis = analyze(self.wav, Path(self.tmp.name))
         projectiles = set()
@@ -113,10 +144,14 @@ class PipelineTest(unittest.TestCase):
             beat = scene.obstacles[0].hit_time
             scene.update(1 / 30, beat, [(beat, scene.obstacles[0].strong)])
             self.assertGreater(scene.squash, 0.05)
+            samples = [scene.squash]
             for step in range(24):
                 scene.update(1 / 30, beat + (step + 1) / 30, [])
-            self.assertTrue(math.isfinite(scene.squash))
-            self.assertLess(abs(scene.squash), 1.36)
+                samples.append(scene.squash)
+            self.assertTrue(all(math.isfinite(value) for value in samples))
+            self.assertLess(max(abs(value) for value in samples), 1.36)
+            jumps = [abs(samples[i + 1] - samples[i]) for i in range(len(samples) - 1)]
+            self.assertLess(max(jumps), 0.15, name)
         self.assertEqual(len(projectiles), len(THEMES))
         self.assertEqual(len(feels), len(THEMES))
 
