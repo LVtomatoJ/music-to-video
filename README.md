@@ -69,7 +69,7 @@ python -m unittest tests.test_pipeline
 
 | 路径 | 内容 |
 | --- | --- |
-| `music2video/` | 正式 CLI。`analysis.py`、`mapscene.py`、`registry.py`、`scene.py`、`render.py`、`encode.py`、`cli.py` |
+| `music2video/` | 正式 CLI。`analysis.py`、`mapscene.py`、`themes.py`、`registry.py`、`scene.py`、`render.py`、`encode.py`、`cli.py` |
 | `prototypes/python` | librosa + cairo 原型 |
 | `prototypes/web` | Web Audio AnalyserNode + Canvas + WebCodecs |
 | `prototypes/rust` | rustfft + tiny-skia + ffmpeg |
