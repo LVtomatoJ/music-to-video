@@ -23,6 +23,7 @@ class Segment:
     y0: float
     x1: float
     y1: float
+    bow: float = 0.0
 
 
 @dataclass
@@ -129,6 +130,10 @@ class MapScene:
         self.hold = 0.0
         self.spin = 0.0
         self.spin_v = 0.0
+        self.split_life = 0.0
+        self.split_max = 0.5
+        self.split_count = 0
+        self.section_energy = 0.4
         self.skin: Theme | None = None
         self.ball_r = BALL_R
         self.analysis: Analysis | None = None
@@ -192,15 +197,29 @@ class MapScene:
             pos = (-ivx * dist, -ivy * dist)
         counts = {name: 0 for name in self.skin.objects}
         last_kind = ""
-        polys: list[tuple[tuple[float, float], tuple[float, float]]] = []
+        last_phrase = ""
+        strong_ordinal = 0
+        gaps = [deduped[i][0] - deduped[i - 1][0] for i in range(1, len(deduped))]
+        median_dt = sorted(gaps)[len(gaps) // 2] if gaps else 0.5
+        polys: list[tuple[tuple[float, float], tuple[float, float], float]] = []
         for index, (beat, is_strong) in enumerate(deduped):
+            section = section_at(self.analysis.sections if self.analysis else (), beat)
+            phrase, speed, spread, bow_frac, extend = _phrase_motion(section.label, index, is_strong)
+            # A stretch starts a longer hall before the next square-spiral corner.
+            if extend and phrase != last_phrase:
+                row_left += 2
+            last_phrase = phrase
             ivx, ivy = _unit(math.cos(heading), math.sin(heading))
             dt = max(1e-3, beat - t_prev)
-            length = SPEED * dt
+            length = speed * dt
+            # A fast grid cannot throw a chord across the spiral. A slow gap
+            # keeps the longer flight, which is the visible stretch.
+            if median_dt < 0.55:
+                length = min(length, 340.0 * math.sqrt(dt / median_dt))
             hit = (pos[0] + ivx * length, pos[1] + ivy * length)
             next_lane = lane
             next_side = -side
-            next_spread = SPREAD + (0.32 if is_strong else 0.0)
+            next_spread = spread
             row_left -= 1
             if row_left <= 0:
                 next_lane = lane + math.pi / 2
@@ -208,7 +227,7 @@ class MapScene:
                 if turns % 2 == 0:
                     row_len += 3
                 row_left = row_len
-                next_spread = 0.12
+                next_spread = 0.22 if phrase == "cluster" else 0.12
                 next_side = side
             ovx, ovy = _unit(math.cos(next_lane + next_side * next_spread), math.sin(next_lane + next_side * next_spread))
             # Steer around a clash by rotating the whole bounce. The departure
@@ -217,13 +236,24 @@ class MapScene:
             hit, ivx, ivy, ovx, ovy = _avoid_overlap(pos, hit, (ivx, ivy), (ovx, ovy), polys, length)
             nx, ny = _unit(ivx - ovx, ivy - ovy)
             tx, ty = -ny, nx
-            section = section_at(self.analysis.sections if self.analysis else (), beat)
             kind = _choose_kind(self.skin.objects, is_strong, counts, last_kind, self.rng)
             counts[kind] += 1
             last_kind = kind
+            flourish = False
+            if is_strong:
+                strong_ordinal += 1
+                flourish = strong_ordinal % 4 == 0
+            variant = _choose_variant(self.skin, kind, section.label, flourish, self.rng)
             scale = min(1.0, length / 280.0)
             size, peg_r, spin, _ignored = _object_dims(kind, is_strong, section.energy, scale, self.rng)
+            size = min(420.0, size * _VARIANT_SCALE.get(variant, 1.0) * _SECTION_SIZE.get(section.label, 1.0))
+            if kind == "peg":
+                peg_r = size
+            bow = 0.0
+            if phrase == "curve":
+                bow = _fit_bow(pos, hit, min(18.0, bow_frac * length), polys)
             kind_hue = self.skin.hue_step * self.skin.objects.index(kind)
+            light = self.skin.object_light * _SECTION_LIGHT.get(section.label, 1.0)
             self.obstacles.append(
                 Obstacle(
                     kind=kind,
@@ -242,11 +272,13 @@ class MapScene:
                     peg_r=peg_r,
                     kind_hue=kind_hue,
                     sat=self.skin.object_sat,
-                    light=self.skin.object_light,
+                    light=light,
+                    variant=variant,
+                    flourish=flourish,
                 )
             )
-            self.segments.append(Segment(t_prev, beat, pos[0], pos[1], hit[0], hit[1]))
-            polys.append((pos, hit))
+            self.segments.append(Segment(t_prev, beat, pos[0], pos[1], hit[0], hit[1], bow))
+            polys.append((pos, hit, bow))
             pos = hit
             t_prev = beat
             lane = next_lane
@@ -272,20 +304,20 @@ class MapScene:
             if time <= seg.t1:
                 span = seg.t1 - seg.t0
                 u = 0.0 if span <= 1e-9 else (time - seg.t0) / span
-                return seg.x0 + (seg.x1 - seg.x0) * u, seg.y0 + (seg.y1 - seg.y0) * u
+                return _point_on(seg, u)
         last = self.segments[-1]
         return last.x1, last.y1
 
     def velocity_at(self, time: float) -> tuple[float, float]:
         for seg in self.segments:
             if time <= seg.t1:
-                span = max(1e-6, seg.t1 - seg.t0)
-                return (seg.x1 - seg.x0) / span, (seg.y1 - seg.y0) / span
+                span = seg.t1 - seg.t0
+                u = 0.0 if span <= 1e-9 else (time - seg.t0) / span
+                return _velocity_on(seg, u)
         if not self.segments:
             return SPEED, 0.0
         last = self.segments[-1]
-        span = max(1e-6, last.t1 - last.t0)
-        return (last.x1 - last.x0) / span, (last.y1 - last.y0) / span
+        return _velocity_on(last, 1.0)
 
     def update(self, dt: float, time: float, events: list[tuple[float, bool]]) -> None:
         self._decay(dt)
@@ -297,6 +329,8 @@ class MapScene:
         trail_keep = self.skin.feel.trail_length if self.skin else 16
         if len(self.trail) > trail_keep:
             del self.trail[:-trail_keep]
+        section = section_at(self.analysis.sections if self.analysis else (), time)
+        self.section_energy = section.energy
         vx, vy = self.velocity_at(time)
         # Ease the camera. A hard velocity jump at a bounce must not yank the frame.
         target_x = self.pos[0] + vx * 0.02
@@ -312,6 +346,8 @@ class MapScene:
     def _decay(self, dt: float) -> None:
         fade = math.exp(-8.0 * dt)
         self.shake *= math.exp(-14.0 * dt)
+        if self.split_life > 0.0:
+            self.split_life = max(0.0, self.split_life - dt)
         self._spring(dt)
         self.chroma *= math.exp(-5.0 * dt)
         self.morph *= math.exp(-3.5 * dt)
@@ -354,10 +390,13 @@ class MapScene:
         obs.lit = True
         obs.flash = 1.0
         feel = self.skin.feel
-        self.bg_flash = feel.pause + 0.35
+        section_gain = _SECTION_GAIN.get(obs.section, 1.0)
         weight = 0.7 + 0.3 * obs.energy + (0.15 if obs.strong else 0.0)
-        intensity = min(1.0, self.skin.intensity * weight)
-        self.squash = feel.squash * (0.85 + 0.15 * weight)
+        intensity = min(1.6, self.skin.intensity * weight * section_gain)
+        if obs.flourish:
+            intensity = min(1.9, intensity * 1.65)
+        self.bg_flash = (feel.pause + 0.35) * section_gain * (1.35 if obs.flourish else 1.0)
+        self.squash = min(1.2, feel.squash * (0.72 + 0.38 * section_gain) * (0.85 + 0.15 * weight))
         self.squash_v = 0.0
         self.hold = feel.pause * (1.2 if obs.strong else 1.0)
         self.squash_nx, self.squash_ny = obs.nx, obs.ny
@@ -368,9 +407,11 @@ class MapScene:
             self.spin_v += feel.tumble * direction * (1.0 if obs.strong else 0.45)
         for name in self.skin.effects:
             EFFECTS[name](self, obs, intensity, self.rng)
+        if obs.flourish:
+            _flourish(self, obs, intensity)
 
-    def add_ring(self, x: float, y: float, growth: float, hue: float, width: float) -> None:
-        self.rings.append(Ring(x, y, 12.0, growth, width, hue, 0.38, 0.38))
+    def add_ring(self, x: float, y: float, growth: float, hue: float, width: float, life: float = 0.38) -> None:
+        self.rings.append(Ring(x, y, 12.0, growth, width, hue, life, life))
 
     def add_spark(self, x, y, vx, vy, radius, hue, life) -> None:
         self.sparks.append(Spark(x, y, vx, vy, radius, hue, life, life, "spark", 0.0, 0.0))
@@ -442,7 +483,7 @@ class MapScene:
         max_pos = 0.0
         max_time = 0.0
         min_clear = 1e9
-        polys = [(seg.x0, seg.y0, seg.x1, seg.y1) for seg in self.segments[: len(self.obstacles)]]
+        flown = self.segments[: len(self.obstacles)]
         for index, obs in enumerate(self.obstacles):
             px, py = self.position_at(obs.hit_time)
             max_pos = max(max_pos, math.hypot(px - obs.x, py - obs.y))
@@ -454,15 +495,8 @@ class MapScene:
                     best_err = err
                     best_t = obs.hit_time + offset
             max_time = max(max_time, abs(best_t - obs.hit_time))
-            a = (polys[index][0], polys[index][1])
-            b = (polys[index][2], polys[index][3])
             for other in range(index - 1):
-                c = (polys[other][0], polys[other][1])
-                d = (polys[other][2], polys[other][3])
-                if _intersects(a, b, c, d):
-                    min_clear = min(min_clear, 0.0)
-                else:
-                    min_clear = min(min_clear, _segment_distance(a, b, c, d))
+                min_clear = min(min_clear, _pieces_clearance(flown[index], flown[other]))
         if min_clear > 1e8:
             min_clear = 0.0
         kinds = sorted({obs.kind for obs in self.obstacles})
@@ -531,22 +565,25 @@ def _avoid_overlap(pos, hit, incoming, outgoing, polys, length):
     """Yaw the whole corner until this arrival is clear.
 
     Incoming and outgoing rotate together, so the bounce angle is unchanged.
-    A one-sided bend used to mirror across the old normal and cancel the
-    turn, which made the next segment wander.
+    A fast song can grow a long hall that would cut the spiral; a shorter
+    chord at the same bounce is tried before giving up.
     """
     ix, iy = incoming
     ox, oy = outgoing
     if not _blocked(pos, hit, polys):
         return hit, ix, iy, ox, oy
-    for degrees in (12, -12, 22, -22, 34, -34, 48, -48, 66, -66, 84, -84):
-        rad = math.radians(degrees)
-        cosine, sine = math.cos(rad), math.sin(rad)
-        ux, uy = ix * cosine - iy * sine, ix * sine + iy * cosine
-        vx, vy = ox * cosine - oy * sine, ox * sine + oy * cosine
-        candidate = (pos[0] + ux * length, pos[1] + uy * length)
-        if not _blocked(pos, candidate, polys):
-            return candidate, ux, uy, vx, vy
-    # Last resort: bend the arrival and reflect it, still a real bounce.
+    angles = [0]
+    for degrees in (12, 22, 34, 48, 66, 84, 110, 140, 168):
+        angles.extend((degrees, -degrees))
+    for chord in (length, length * 0.78, length * 0.58):
+        for degrees in angles:
+            rad = math.radians(degrees)
+            cosine, sine = math.cos(rad), math.sin(rad)
+            ux, uy = ix * cosine - iy * sine, ix * sine + iy * cosine
+            vx, vy = ox * cosine - oy * sine, ox * sine + oy * cosine
+            candidate = (pos[0] + ux * chord, pos[1] + uy * chord)
+            if not _blocked(pos, candidate, polys):
+                return candidate, ux, uy, vx, vy
     nx, ny = _unit(ix - ox, iy - oy)
     tx, ty = -iy, ix
     for scale in (0.45, 0.9, -0.45, -0.9, 1.4, -1.4, 2.0, -2.0):
@@ -559,14 +596,16 @@ def _avoid_overlap(pos, hit, incoming, outgoing, polys, length):
 
 
 def _align_bounce_normals(obstacles, segments) -> None:
-    """Make each surface the reflection normal of the flown corner."""
+    """Make each surface the reflection normal of the flown corner.
+
+    A gentle bow changes the tangent at the joint, so the normal follows
+    those tangents rather than the straight chord.
+    """
     for index, obs in enumerate(obstacles):
         if index + 1 >= len(segments):
             continue
-        arrived = segments[index]
-        left = segments[index + 1]
-        ix, iy = _unit(arrived.x1 - arrived.x0, arrived.y1 - arrived.y0)
-        ox, oy = _unit(left.x1 - left.x0, left.y1 - left.y0)
+        ix, iy = _segment_tangent(segments[index], at_end=True)
+        ox, oy = _segment_tangent(segments[index + 1], at_end=False)
         dx, dy = ix - ox, iy - oy
         if math.hypot(dx, dy) < 1e-6:
             continue
@@ -576,11 +615,194 @@ def _align_bounce_normals(obstacles, segments) -> None:
 
 
 def _blocked(a, b, polys) -> bool:
-    # The newest segment shares an endpoint with the candidate, so it is not a clash.
-    older = polys[:-1]
-    for c, d in older:
-        if _intersects(a, b, c, d) or _segment_distance(a, b, c, d) < CLEARANCE:
+    # The newest segment shares its end with this departure. A shallow corridor
+    # stays near that corner; only a fold that lands back on the line counts.
+    for index, (c, d, bow) in enumerate(polys):
+        recent = index == len(polys) - 1
+        for p, q in _poly_pieces(c, d, bow):
+            if recent:
+                if _folds_back(a, b, p, q):
+                    return True
+                continue
+            if _intersects(a, b, p, q) or _segment_distance(a, b, p, q) < CLEARANCE:
+                return True
+    return False
+
+
+def _folds_back(a, b, p, q) -> bool:
+    """True when the new chord returns onto the segment it just left."""
+    if _intersects(a, b, p, q) and math.hypot(b[0] - a[0], b[1] - a[1]) > 24:
+        # A shared start is not an intersection under the strict cross test.
+        return True
+    for step in range(2, 7):
+        u = step / 6.0
+        point = (a[0] + (b[0] - a[0]) * u, a[1] + (b[1] - a[1]) * u)
+        if math.hypot(point[0] - a[0], point[1] - a[1]) < 80:
+            continue
+        if _segment_distance(point, point, p, q) < 18:
             return True
+    return False
+
+
+_SECTION_SIZE = {"calm": 0.74, "mid": 1.0, "intense": 1.36}
+_SECTION_LIGHT = {"calm": 0.78, "mid": 1.0, "intense": 1.08}
+_SECTION_GAIN = {"calm": 0.42, "mid": 1.0, "intense": 1.5}
+_VARIANT_SCALE = {
+    "short": 0.58,
+    "long": 1.7,
+    "corner": 1.2,
+    "double": 1.15,
+    "arch": 1.35,
+    "single": 0.85,
+    "pair": 1.0,
+    "chord": 1.05,
+    "pattern": 1.1,
+    "crack": 1.25,
+    "block": 1.0,
+    "stack": 1.2,
+}
+_QUIET_VARIANTS = {"short", "single", "crack"}
+_RICH_VARIANTS = {"long", "double", "corner", "stack", "chord", "pattern", "arch", "pair"}
+
+
+def _phrase_motion(label: str, index: int, strong: bool) -> tuple[str, float, float, float, bool]:
+    """Speed, bounce spread, and bow for this beat.
+
+    Calm stretches travel farther between hits. Intense clusters pack the
+    same family of obstacles into a shorter run. Curves stay a small bow
+    on the chord so the tangent never reverses.
+    """
+    if label == "intense" and index % 10 != 0:
+        return "cluster", 480.0, 0.8 if strong else 0.64, 0.0, False
+    if label == "calm":
+        if (index // 4) % 2 == 0:
+            return "stretch", 860.0, 0.22, 0.0, True
+        return "corridor", 680.0, 0.36, 0.0, False
+    if index % 3 != 2:
+        return "curve", 640.0, 0.5, 0.12, False
+    return "corridor", 720.0, 0.32, 0.0, False
+
+
+def _variants_for(theme: Theme, kind: str) -> tuple[str, ...]:
+    for name, options in theme.variants:
+        if name == kind:
+            return options
+    return ("plain",)
+
+
+def _choose_variant(theme: Theme, kind: str, label: str, flourish: bool, rng: list[int]) -> str:
+    options = list(_variants_for(theme, kind))
+    if flourish:
+        rich = [name for name in options if name in _RICH_VARIANTS]
+        if rich:
+            return rich[int(xorshift32(rng) * len(rich)) % len(rich)]
+    if label == "calm":
+        quiet = [name for name in options if name in _QUIET_VARIANTS]
+        if quiet and xorshift32(rng) < 0.72:
+            return quiet[int(xorshift32(rng) * len(quiet)) % len(quiet)]
+    if label == "intense":
+        rich = [name for name in options if name in _RICH_VARIANTS]
+        if rich and xorshift32(rng) < 0.7:
+            return rich[int(xorshift32(rng) * len(rich)) % len(rich)]
+    return options[int(xorshift32(rng) * len(options)) % len(options)]
+
+
+def _flourish(scene: MapScene, obs: Obstacle, intensity: float) -> None:
+    kind = scene.skin.flourish if scene.skin is not None else ""
+    if kind == "ring":
+        scene.add_ring(obs.x, obs.y, 48 + 30 * intensity, obs.kind_hue, 20 + 6 * intensity, life=0.55)
+    elif kind == "split":
+        scene.split_max = 0.52
+        scene.split_life = scene.split_max
+        scene.split_count = 3 if obs.section == "intense" else 2
+    elif kind == "break":
+        for _ in range(16):
+            ang = xorshift32(scene.rng) * math.tau
+            speed = 140 + xorshift32(scene.rng) * 320
+            scene.add_fragment(
+                obs.x,
+                obs.y,
+                math.cos(ang) * speed + obs.nx * 80,
+                math.sin(ang) * speed + obs.ny * 80,
+                6 + xorshift32(scene.rng) * 8,
+                obs.kind_hue,
+                0.7,
+                xorshift32(scene.rng) * math.tau,
+            )
+        scene.bump_shake(max(scene.shake, 12 + 10 * intensity))
+    elif kind == "arpeggio":
+        scene.add_ring(obs.x, obs.y, 40, obs.kind_hue, 8, life=0.45)
+    elif kind == "burst":
+        scene.add_ring(obs.x, obs.y, 80, obs.kind_hue, 6, life=0.32)
+
+
+def _point_on(seg: Segment, u: float) -> tuple[float, float]:
+    return _bulge_point((seg.x0, seg.y0), (seg.x1, seg.y1), seg.bow, u)
+
+
+def _velocity_on(seg: Segment, u: float) -> tuple[float, float]:
+    span = max(1e-6, seg.t1 - seg.t0)
+    dx, dy = seg.x1 - seg.x0, seg.y1 - seg.y0
+    lateral = 4.0 * (1.0 - 2.0 * u) * seg.bow
+    if abs(lateral) < 1e-8:
+        return dx / span, dy / span
+    length = math.hypot(dx, dy) or 1.0
+    px, py = -dy / length, dx / length
+    return (dx + px * lateral) / span, (dy + py * lateral) / span
+
+
+def _segment_tangent(seg: Segment, at_end: bool) -> tuple[float, float]:
+    return _unit(*_velocity_on(seg, 1.0 if at_end else 0.0))
+
+
+def _bulge_point(a, b, bow: float, u: float) -> tuple[float, float]:
+    x = a[0] + (b[0] - a[0]) * u
+    y = a[1] + (b[1] - a[1]) * u
+    bulge = 4.0 * u * (1.0 - u) * bow
+    if abs(bulge) < 1e-8:
+        return x, y
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    length = math.hypot(dx, dy) or 1.0
+    return x + (-dy / length) * bulge, y + (dx / length) * bulge
+
+
+def _poly_pieces(a, b, bow: float):
+    if abs(bow) < 1e-3:
+        return [(a, b)]
+    points = [_bulge_point(a, b, bow, u) for u in (0.0, 0.25, 0.5, 0.75, 1.0)]
+    return list(zip(points, points[1:]))
+
+
+def _pieces_clearance(left: Segment, right: Segment) -> float:
+    best = 1e9
+    for a, b in _poly_pieces((left.x0, left.y0), (left.x1, left.y1), left.bow):
+        for c, d in _poly_pieces((right.x0, right.y0), (right.x1, right.y1), right.bow):
+            if _intersects(a, b, c, d):
+                return 0.0
+            best = min(best, _segment_distance(a, b, c, d))
+    return best
+
+
+def _fit_bow(a, b, magnitude: float, polys) -> float:
+    if magnitude < 1.0:
+        return 0.0
+    for sign in (1.0, -1.0):
+        bow = magnitude * sign
+        if not _curve_blocked(a, b, bow, polys):
+            return bow
+    return 0.0
+
+
+def _curve_blocked(a, b, bow: float, polys) -> bool:
+    # Skip the piece that leaves the shared start; it sits on the previous corner.
+    pieces = _poly_pieces(a, b, bow)
+    if len(pieces) > 1:
+        pieces = pieces[1:]
+    for c, d, other in polys:
+        for p, q in pieces:
+            for r, s in _poly_pieces(c, d, other):
+                if _intersects(p, q, r, s) or _segment_distance(p, q, r, s) < CLEARANCE:
+                    return True
     return False
 
 

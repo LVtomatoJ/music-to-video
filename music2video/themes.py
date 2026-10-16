@@ -43,6 +43,9 @@ class Theme:
     intensity: float
     flash: float
     show_spectrum: bool
+    # Same-family shapes. A neon video never grows pegs; a pastel video never grows cracks.
+    variants: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    flourish: str = ""
 
 
 THEMES: dict[str, Theme] = {}
@@ -99,6 +102,8 @@ register_theme(
         intensity=0.8,
         flash=0.1,
         show_spectrum=True,
+        variants=(("wall", ("short", "long", "corner", "double")),),
+        flourish="ring",
     )
 )
 
@@ -131,6 +136,12 @@ register_theme(
         intensity=0.95,
         flash=0.22,
         show_spectrum=True,
+        variants=(
+            ("peg", ("single", "pair")),
+            ("pad", ("short", "long")),
+            ("spinner", ("short", "long")),
+        ),
+        flourish="burst",
     )
 )
 
@@ -163,6 +174,11 @@ register_theme(
         intensity=0.55,
         flash=0.06,
         show_spectrum=False,
+        variants=(
+            ("piano", ("single", "chord", "pattern")),
+            ("platform", ("short", "long")),
+        ),
+        flourish="arpeggio",
     )
 )
 
@@ -195,6 +211,11 @@ register_theme(
         intensity=1.0,
         flash=0.34,
         show_spectrum=False,
+        variants=(
+            ("breakable", ("crack", "block", "stack")),
+            ("wall", ("short", "long")),
+        ),
+        flourish="break",
     )
 )
 
@@ -227,5 +248,10 @@ register_theme(
         intensity=0.4,
         flash=0.05,
         show_spectrum=False,
+        variants=(
+            ("platform", ("short", "long", "arch")),
+            ("wall", ("short", "long")),
+        ),
+        flourish="split",
     )
 )

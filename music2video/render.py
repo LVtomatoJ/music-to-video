@@ -88,13 +88,16 @@ class CairoRenderer:
         skin = scene.skin
         style = skin.background if skin is not None else "neon"
         hue = scene.theme_hue
+        energy = max(0.0, min(1.0, getattr(scene, "section_energy", 0.4)))
+        breath = 0.5 + 0.5 * math.sin(scene.time * (0.7 + 1.5 * energy))
+        depth = 0.16 + 0.46 * energy
         if style in {"arcade", "pastel"}:
             red, green, blue = hsl_to_rgb(hue, 0.35 if style == "pastel" else 0.7, 0.7)
             ctx.save()
             ctx.translate(self.width / 2 + shake_x * 0.4, self.height / 2 + shake_y * 0.4)
-            ctx.translate(-scene.cam_x * 0.28, -scene.cam_y * 0.28)
+            ctx.translate(-scene.cam_x * depth, -scene.cam_y * depth)
             radius = 7.0 if style == "pastel" else 3.2
-            alpha = 0.16 if style == "pastel" else 0.45
+            alpha = (0.1 if style == "pastel" else 0.32) * (0.55 + 0.9 * energy) * (0.85 + 0.25 * breath)
             for index, (sx, sy) in enumerate(scene.stars):
                 if style == "arcade":
                     red, green, blue = hsl_to_rgb(hue + (index % 5) * 36, 0.75, 0.62)
@@ -105,13 +108,13 @@ class CairoRenderer:
         if style != "shatter":
             ctx.save()
             ctx.translate(self.width / 2 + shake_x * 0.7, self.height / 2 + shake_y * 0.7)
-            ctx.translate(-scene.cam_x * 0.55, -scene.cam_y * 0.55)
+            ctx.translate(-scene.cam_x * (depth + 0.22), -scene.cam_y * (depth + 0.22))
             step = 140.0 if style == "piano" else 220.0
             left = scene.cam_x * 0.55 - self.width
             right = scene.cam_x * 0.55 + self.width
             top = scene.cam_y * 0.55 - self.height
             bottom = scene.cam_y * 0.55 + self.height
-            line = 0.16 if style == "neon" else 0.05
+            line = (0.16 if style == "neon" else 0.05) * (0.4 + energy) * (0.75 + 0.4 * breath)
             ctx.set_source_rgba(*hsl_to_rgb(hue, 0.6, 0.7), line)
             ctx.set_line_width(1.4 if style == "neon" else 1)
             if style == "piano":
@@ -135,14 +138,14 @@ class CairoRenderer:
             ctx.stroke()
             ctx.restore()
         pulse = scene.sample_rms(scene.time)
-        spread = 0.22 if style == "pastel" else 0.5
+        spread = (0.14 if style == "pastel" else 0.32) * (0.5 + 1.2 * energy) * (0.75 + 0.4 * pulse)
         grad = cairo.RadialGradient(
             self.width / 2 + shake_x,
             self.height / 2 + shake_y,
             30,
             self.width / 2,
             self.height / 2,
-            max(self.width, self.height) * 0.72,
+            max(self.width, self.height) * (0.55 + 0.28 * energy),
         )
         lift = hsl_to_rgb(hue, skin.bg_sat if skin is not None else 0.5, 0.18 + 0.08 * pulse)
         grad.add_color_stop_rgba(0, lift[0], lift[1], lift[2], spread)
@@ -179,6 +182,7 @@ class CairoRenderer:
             hue = (scene.theme_hue + obs.kind_hue) % 360
             OBJECTS[obs.kind].draw(ctx, obs, time, alpha, hue)
         _draw_trail(ctx, scene)
+        _draw_split(ctx, scene)
         for ring in scene.rings:
             k = max(0.0, ring.life / ring.max_life)
             red, green, blue = hsl_to_rgb((ring.hue + scene.theme_hue) % 360, 0.7, 0.62)
@@ -236,6 +240,34 @@ def _bg_for(scene) -> tuple[float, float, float]:
     red, green, blue = hsl_to_rgb(skin.hue, skin.bg_sat, skin.bg_light + 0.045 * rms)
     lift = skin.flash * min(1.0, scene.bg_flash)
     return min(1.0, red + lift), min(1.0, green + lift), min(1.0, blue + lift)
+
+
+def _draw_split(ctx, scene) -> None:
+    """Pastel flourish: two or three bubbles leave the flyer and come back.
+
+    The flyer itself stays on the path. The satellites only exist during the
+    flourish, and their offset returns to zero so they merge instead of lingering.
+    """
+    if scene.split_life <= 0.0 or scene.split_count < 2 or scene.split_max <= 0.0:
+        return
+    progress = 1.0 - scene.split_life / scene.split_max
+    spread = math.sin(math.pi * max(0.0, min(1.0, progress)))
+    if spread < 0.04:
+        return
+    vx, vy = scene.velocity_at(scene.time)
+    length = math.hypot(vx, vy) or 1.0
+    px, py = -vy / length, vx / length
+    red, green, blue = hsl_to_rgb(scene.theme_hue, 0.25, 0.82)
+    for index in range(scene.split_count):
+        slot = index - (scene.split_count - 1) / 2.0
+        offset = slot * 34.0 * spread
+        ctx.set_source_rgba(red, green, blue, 0.22 + 0.35 * spread)
+        ctx.arc(scene.pos[0] + px * offset, scene.pos[1] + py * offset, 8 + 5 * spread, 0, math.tau)
+        ctx.fill()
+        ctx.set_source_rgba(1, 1, 1, 0.55)
+        ctx.set_line_width(2)
+        ctx.arc(scene.pos[0] + px * offset, scene.pos[1] + py * offset, 8 + 5 * spread, 0, math.tau)
+        ctx.stroke()
 
 
 def _draw_trail(ctx, scene) -> None:

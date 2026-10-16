@@ -36,6 +36,8 @@ class Obstacle:
     kind_hue: float
     sat: float = 0.72
     light: float = 0.42
+    variant: str = "plain"
+    flourish: bool = False
     lit: bool = False
     broken: bool = False
     flash: float = 0.0
@@ -90,18 +92,34 @@ def draw_wall(ctx, obs: Obstacle, time: float, alpha: float, hue: float) -> None
     if alpha <= 0.02:
         return
     length = obs.size
-    thick = 16 + (8 if obs.strong else 0)
+    variant = obs.variant
+    thick = 14 if variant == "short" else 18
     ctx.save()
     _place(ctx, obs)
     red, green, blue = _body(obs, hue, obs.lit)
     ctx.set_source_rgba(red, green, blue, alpha)
     ctx.rectangle(0, -length / 2, thick, length)
     ctx.fill()
+    if variant == "double":
+        ctx.rectangle(thick + 16, -length * 0.42, thick * 0.75, length * 0.84)
+        ctx.fill()
+    if variant == "corner":
+        arm = max(54.0, length * 0.42)
+        ctx.rectangle(0, length / 2 - thick, arm, thick)
+        ctx.fill()
     ctx.set_source_rgba(1, 1, 1, alpha * (0.85 if obs.lit else 0.25))
     ctx.set_line_width(3)
     ctx.move_to(0, -length / 2)
     ctx.line_to(0, length / 2)
     ctx.stroke()
+    if variant == "double":
+        ctx.move_to(thick + 16, -length * 0.42)
+        ctx.line_to(thick + 16, length * 0.42)
+        ctx.stroke()
+    if variant == "corner":
+        ctx.move_to(0, length / 2 - thick / 2)
+        ctx.line_to(max(54.0, length * 0.42), length / 2 - thick / 2)
+        ctx.stroke()
     ctx.restore()
 
 
@@ -110,21 +128,28 @@ def draw_platform(ctx, obs: Obstacle, time: float, alpha: float, hue: float) -> 
     if alpha <= 0.02:
         return
     length = obs.size
-    thick = 22
+    thick = 16 if obs.variant == "short" else 22
     ctx.save()
     _place(ctx, obs)
     red, green, blue = _body(obs, hue, obs.lit)
     ctx.set_source_rgba(red, green, blue, alpha)
-    ctx.rectangle(0, -length / 2, thick, length)
-    ctx.fill()
-    ctx.set_source_rgba(1, 1, 1, alpha * (0.9 if obs.lit else 0.35))
-    ctx.rectangle(0, -length / 2, 4, length)
-    ctx.fill()
-    # Two short legs so a platform does not read as another wall.
-    ctx.set_source_rgba(red, green, blue, alpha * 0.85)
-    for foot in (-length * 0.32, length * 0.32):
-        ctx.rectangle(thick * 0.35, foot - 5, thick * 1.3, 10)
+    if obs.variant == "arch":
+        # Crown sits on the contact point. The body bows back into the platform.
+        ctx.set_line_width(thick)
+        ctx.set_line_cap(1)
+        ctx.move_to(length * 0.18, -length / 2)
+        ctx.curve_to(-length * 0.06, -length * 0.18, -length * 0.06, length * 0.18, length * 0.18, length / 2)
+        ctx.stroke()
+    else:
+        ctx.rectangle(0, -length / 2, thick, length)
         ctx.fill()
+        ctx.set_source_rgba(1, 1, 1, alpha * (0.9 if obs.lit else 0.35))
+        ctx.rectangle(0, -length / 2, 4, length)
+        ctx.fill()
+        ctx.set_source_rgba(red, green, blue, alpha * 0.85)
+        for foot in (-length * 0.32, length * 0.32):
+            ctx.rectangle(thick * 0.35, foot - 5, thick * 1.3, 10)
+            ctx.fill()
     ctx.restore()
 
 
@@ -136,16 +161,21 @@ def draw_peg(ctx, obs: Obstacle, time: float, alpha: float, hue: float) -> None:
     cy = obs.y + obs.ny * (BALL_R + obs.peg_r)
     red, green, blue = _body(obs, hue, obs.lit)
     ctx.set_source_rgba(red, green, blue, alpha)
-    ctx.arc(cx, cy, obs.peg_r, 0, math.tau)
-    ctx.fill()
-    ctx.set_source_rgba(0.05, 0.06, 0.09, alpha)
-    ctx.arc(cx, cy, obs.peg_r * 0.38, 0, math.tau)
-    ctx.fill()
-    if obs.lit:
-        ctx.set_source_rgba(1, 1, 1, alpha * 0.8 * max(obs.flash, 0.25))
-        ctx.set_line_width(3)
-        ctx.arc(cx, cy, obs.peg_r + 3, 0, math.tau)
-        ctx.stroke()
+    disks = [(cx, cy, obs.peg_r)]
+    if obs.variant == "pair":
+        disks.append((cx + obs.tx * obs.peg_r * 2.4, cy + obs.ty * obs.peg_r * 2.4, obs.peg_r * 0.78))
+    for disk_x, disk_y, radius in disks:
+        ctx.set_source_rgba(red, green, blue, alpha)
+        ctx.arc(disk_x, disk_y, radius, 0, math.tau)
+        ctx.fill()
+        ctx.set_source_rgba(0.05, 0.06, 0.09, alpha)
+        ctx.arc(disk_x, disk_y, radius * 0.38, 0, math.tau)
+        ctx.fill()
+        if obs.lit:
+            ctx.set_source_rgba(1, 1, 1, alpha * 0.8 * max(obs.flash, 0.25))
+            ctx.set_line_width(3)
+            ctx.arc(disk_x, disk_y, radius + 3, 0, math.tau)
+            ctx.stroke()
 
 
 def draw_pad(ctx, obs: Obstacle, time: float, alpha: float, hue: float) -> None:
@@ -177,15 +207,36 @@ def draw_breakable(ctx, obs: Obstacle, time: float, alpha: float, hue: float) ->
     if alpha <= 0.02:
         return
     side = obs.size
+    variant = obs.variant
     ctx.save()
     _place(ctx, obs)
+    red, green, blue = _body(obs, hue, obs.lit or obs.broken)
     if obs.broken:
-        red, green, blue = _body(obs, hue, True)
         ctx.set_source_rgba(red, green, blue, alpha * 0.35)
-        ctx.arc(side * 0.4, 0, side * 0.45, 0, math.tau)
+        ctx.arc(side * 0.35, 0, side * (0.55 if obs.flourish else 0.4), 0, math.tau)
         ctx.fill()
+    elif variant == "crack":
+        ctx.set_source_rgba(red, green, blue, alpha)
+        ctx.rectangle(0, -side, 12, side * 2)
+        ctx.fill()
+        ctx.set_source_rgba(0.15, 0.05, 0.05, alpha * 0.85)
+        ctx.set_line_width(2)
+        ctx.move_to(6, -side)
+        ctx.line_to(9, -side * 0.35)
+        ctx.line_to(3, side * 0.05)
+        ctx.line_to(8, side)
+        ctx.stroke()
+    elif variant == "stack":
+        ctx.set_source_rgba(red, green, blue, alpha)
+        block_h = side * 0.42
+        for slot in (-1, 0, 1):
+            ctx.rectangle(0, slot * (block_h + 8) - block_h / 2, side * 0.9, block_h)
+            ctx.fill()
+        if obs.lit:
+            ctx.set_source_rgba(1, 1, 1, alpha * 0.35)
+            ctx.rectangle(0, -block_h / 2, side * 0.9, block_h)
+            ctx.fill()
     else:
-        red, green, blue = _body(obs, hue, obs.lit)
         ctx.set_source_rgba(red, green, blue, alpha)
         ctx.rectangle(0, -side / 2, side, side)
         ctx.fill()
@@ -202,8 +253,8 @@ def draw_breakable(ctx, obs: Obstacle, time: float, alpha: float, hue: float) ->
 def draw_spinner(ctx, obs: Obstacle, time: float, alpha: float, hue: float) -> None:
     if alpha <= 0.02:
         return
-    length = obs.size
-    thick = 16
+    length = obs.size * (0.7 if obs.variant == "short" else 1.35 if obs.variant == "long" else 1.0)
+    thick = 22 if obs.variant == "short" else 14
     cx, cy = contact(obs)
     # Tangent at the beat, then spin. Local +y points back at the ball, so the
     # bar sits on the far side of the contact point.
@@ -226,28 +277,39 @@ def draw_spinner(ctx, obs: Obstacle, time: float, alpha: float, hue: float) -> N
 
 
 def draw_piano(ctx, obs: Obstacle, time: float, alpha: float, hue: float) -> None:
-    del time
     if alpha <= 0.02:
         return
-    key_w = max(18.0, obs.size)
-    key_h = key_w * 2.6
+    if obs.variant == "single":
+        indices = (0,)
+    elif obs.variant == "chord":
+        indices = (-1, 0, 1)
+    else:
+        indices = tuple(range(-3, 4))
+    key_w = max(18.0, obs.size if obs.variant != "single" else obs.size * 1.35)
+    key_h = key_w * (3.1 if obs.variant == "single" else 2.6)
     gap = 3.0
+    age = time - obs.hit_time if obs.lit else -1.0
     ctx.save()
     _place(ctx, obs)
-    for index in range(-3, 4):
+    for order, index in enumerate(indices):
         local_y = index * (key_w + gap)
-        center = index == 0
-        if center and obs.lit:
+        black = obs.variant == "pattern" and index % 2 != 0
+        stagger = order * 0.06 if obs.flourish else 0.0
+        key_lit = obs.lit and age + 1e-6 >= stagger
+        height = key_h * (0.62 if black else 1.0)
+        if key_lit and (index == 0 or obs.flourish):
             red, green, blue = _body(obs, hue, True)
+        elif black:
+            red, green, blue = (0.16, 0.16, 0.18)
         else:
-            light = 0.9 if not center else 0.72
+            light = 0.92 if index != 0 else 0.74
             red, green, blue = (light, light, light * 0.96)
         ctx.set_source_rgba(red, green, blue, alpha)
-        ctx.rectangle(0, local_y - key_w / 2, key_h, key_w)
+        ctx.rectangle(0, local_y - key_w / 2, height, key_w)
         ctx.fill()
         ctx.set_source_rgba(0.08, 0.08, 0.1, alpha * 0.7)
         ctx.set_line_width(2)
-        ctx.rectangle(0, local_y - key_w / 2, key_h, key_w)
+        ctx.rectangle(0, local_y - key_w / 2, height, key_w)
         ctx.stroke()
     ctx.restore()
 
@@ -309,7 +371,7 @@ def fx_shatter(scene, obs: Obstacle, intensity: float, rng: list[int]) -> None:
 @register_effect("glow")
 def fx_glow(scene, obs: Obstacle, intensity: float, rng: list[int]) -> None:
     del rng
-    scene.add_ring(obs.x, obs.y, 36 + 40 * intensity, obs.kind_hue, 18)
+    scene.add_ring(obs.x, obs.y, 22 + 48 * intensity, obs.kind_hue, 6 + 16 * intensity)
 
 
 @register_effect("chromatic")

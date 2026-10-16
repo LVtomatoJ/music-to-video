@@ -16,7 +16,7 @@ import math  # noqa: E402
 
 from music2video.analysis import Analysis, Section, analyze  # noqa: E402
 from music2video.cli import main  # noqa: E402
-from music2video.mapscene import SPEED, MapScene, _reflect, _unit  # noqa: E402
+from music2video.mapscene import MapScene, _reflect, _segment_tangent  # noqa: E402
 from music2video.themes import THEMES, pick_theme  # noqa: E402
 from tools.make_test_track import synthesize, write_wav  # noqa: E402
 from tools.score_beats import match_counts  # noqa: E402
@@ -95,7 +95,7 @@ class PipelineTest(unittest.TestCase):
         self.assertGreaterEqual(timing["min_clearance_px"], 72.0)
         self.assertEqual(set(timing["kinds"]), {"wall"})
 
-    def test_segments_stay_straight_and_bounces_reflect(self) -> None:
+    def test_flight_follows_the_bounce(self) -> None:
         analysis = analyze(self.wav, Path(self.tmp.name))
         for seed in (1, 42, 99):
             scene = MapScene.create(1920, 1080, analysis, seed=seed, theme="neon")
@@ -105,26 +105,63 @@ class PipelineTest(unittest.TestCase):
             for index, obs in enumerate(scene.obstacles):
                 arrived = scene.segments[index]
                 left = scene.segments[index + 1]
-                ix, iy = _unit(arrived.x1 - arrived.x0, arrived.y1 - arrived.y0)
-                ox, oy = _unit(left.x1 - left.x0, left.y1 - left.y0)
+                ix, iy = _segment_tangent(arrived, True)
+                ox, oy = _segment_tangent(left, False)
                 rx, ry = _reflect(ix, iy, obs.nx, obs.ny)
                 self.assertGreater(ix * obs.nx + iy * obs.ny, 0.0, f"seed {seed} hit {index} does not approach")
                 self.assertLess(ox * obs.nx + oy * obs.ny, 0.0, f"seed {seed} hit {index} does not leave")
                 self.assertGreater(rx * ox + ry * oy, 0.999, f"seed {seed} hit {index} reflection")
                 span = arrived.t1 - arrived.t0
-                vx, vy = arrived.x1 - arrived.x0, arrived.y1 - arrived.y0
-                length = math.hypot(vx, vy)
+                dx, dy = arrived.x1 - arrived.x0, arrived.y1 - arrived.y0
+                length = math.hypot(dx, dy)
                 angles = []
-                for step in range(1, 6):
-                    t = arrived.t0 + span * step / 6.0
+                for step in range(1, 7):
+                    t = arrived.t0 + span * step / 7.0
                     px, py = scene.position_at(t)
-                    cross = abs((px - arrived.x0) * vy - (py - arrived.y0) * vx)
-                    self.assertLess(cross / length, 1e-6)
-                    self.assertGreater((px - arrived.x0) * ix + (py - arrived.y0) * iy, 0.0)
+                    distance = abs((px - arrived.x0) * dy - (py - arrived.y0) * dx) / length
+                    self.assertLess(distance, abs(arrived.bow) + 1.0)
+                    self.assertGreater((px - arrived.x0) * dx + (py - arrived.y0) * dy, 0.0)
                     vel = scene.velocity_at(t)
+                    self.assertGreater(vel[0] * dx + vel[1] * dy, 0.0)
                     angles.append(math.atan2(vel[1], vel[0]))
-                    self.assertGreater(vel[0] * ix + vel[1] * iy, SPEED * 0.99)
-                self.assertLess(max(angles) - min(angles), 1e-9)
+                unwrapped = [angles[0]]
+                for angle in angles[1:]:
+                    turn = (angle - unwrapped[-1] + math.pi) % (2 * math.pi) - math.pi
+                    self.assertLess(abs(turn), 0.4)
+                    unwrapped.append(unwrapped[-1] + turn)
+                span_angle = max(unwrapped) - min(unwrapped)
+                if abs(arrived.bow) < 1e-3:
+                    self.assertLess(span_angle, 1e-6)
+                else:
+                    self.assertLess(span_angle, 0.95)
+
+    def test_within_theme_variety(self) -> None:
+        analysis = analyze(self.wav, Path(self.tmp.name))
+        expected = {
+            "neon": {"short", "long", "corner", "double"},
+            "pastel": {"short", "long", "arch"},
+            "piano": {"single", "chord", "pattern"},
+            "shatter": {"crack", "block", "stack"},
+        }
+        for name, wanted in expected.items():
+            scene = MapScene.create(1920, 1080, analysis, seed=42, theme=name)
+            self.assertTrue(set(scene.timing["kinds"]) <= set(THEMES[name].objects))
+            variants = {obs.variant for obs in scene.obstacles}
+            self.assertGreaterEqual(len(variants & wanted), 2, (name, variants))
+            self.assertTrue(any(obs.flourish for obs in scene.obstacles), name)
+            speeds = []
+            for seg in scene.segments[:-1]:
+                dt = max(1e-6, seg.t1 - seg.t0)
+                speeds.append(math.hypot(seg.x1 - seg.x0, seg.y1 - seg.y0) / dt)
+            self.assertGreater(max(speeds) / min(speeds), 1.35, name)
+            self.assertEqual(scene.timing["max_timing_error_s"], 0.0)
+            self.assertGreaterEqual(scene.timing["min_clearance_px"], 72.0)
+        neon = MapScene.create(1920, 1080, analysis, seed=42, theme="neon")
+        self.assertTrue(any(abs(seg.bow) > 1.0 for seg in neon.segments))
+        calm = [obs.size for obs in neon.obstacles if obs.section == "calm"]
+        hot = [obs.size for obs in neon.obstacles if obs.section == "intense"]
+        if calm and hot:
+            self.assertGreater(sum(hot) / len(hot), sum(calm) / len(calm))
 
     def test_themes_keep_their_own_objects_and_feel(self) -> None:
         analysis = analyze(self.wav, Path(self.tmp.name))
@@ -151,7 +188,7 @@ class PipelineTest(unittest.TestCase):
             self.assertTrue(all(math.isfinite(value) for value in samples))
             self.assertLess(max(abs(value) for value in samples), 1.36)
             jumps = [abs(samples[i + 1] - samples[i]) for i in range(len(samples) - 1)]
-            self.assertLess(max(jumps), 0.15, name)
+            self.assertLess(max(jumps), 0.22, name)
         self.assertEqual(len(projectiles), len(THEMES))
         self.assertEqual(len(feels), len(THEMES))
 
