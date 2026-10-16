@@ -15,7 +15,7 @@ from typing import Callable
 import cairo
 
 from music2video.scene import hsl_to_rgb
-from music2video.themes import palette_of
+from music2video.themes import PALETTES, palette_of
 
 BALL_R = 28.0
 
@@ -287,6 +287,11 @@ _PALETTE = None
 def bind_palette(theme) -> None:
     global _PALETTE
     _PALETTE = palette_of(theme)
+
+
+def bind_palette_name(name: str) -> None:
+    global _PALETTE
+    _PALETTE = PALETTES.get(name, PALETTES["neon"])
 
 
 def active_palette():

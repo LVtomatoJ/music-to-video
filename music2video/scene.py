@@ -204,4 +204,8 @@ def build_scene(kind: str, width: int, height: int, analysis, seed: int, theme: 
         from music2video.mapscene import MapScene
 
         return MapScene.create(width, height, analysis, seed, theme)
+    if kind in {"city", "piano", "stars"}:
+        from music2video.forms import build_form
+
+        return build_form(kind, width, height, analysis, seed, theme)
     raise SystemExit(f"unknown scene {kind}")

@@ -17,6 +17,8 @@ import math  # noqa: E402
 from music2video.analysis import Analysis, Section, analyze  # noqa: E402
 from music2video.cli import main  # noqa: E402
 from music2video.mapscene import MapScene, _reflect, _segment_tangent, max_flyer_penetration  # noqa: E402
+from music2video.render import CairoRenderer  # noqa: E402
+from music2video.scene import build_scene  # noqa: E402
 from music2video.themes import THEMES, pick_theme  # noqa: E402
 from tools.make_test_track import synthesize, write_wav  # noqa: E402
 from tools.score_beats import match_counts  # noqa: E402
@@ -246,6 +248,50 @@ class PipelineTest(unittest.TestCase):
             )
         )
         self.assertTrue(any(stream["codec_type"] == "audio" for stream in probe["streams"]))
+
+    def test_forms_land_on_the_music(self) -> None:
+        analysis = analyze(self.wav, Path(self.tmp.name))
+        city = build_scene("city", 1920, 1080, analysis, 42, "neon")
+        self.assertEqual(city.form, "city")
+        self.assertGreaterEqual(len(city.buildings), 8)
+        births = {building.born for building in city.buildings}
+        answered = births | {light.time for light in city.lights}
+        for beat in analysis.beats:
+            self.assertTrue(any(abs(beat - when) < 1e-6 for when in answered), beat)
+        for building in city.buildings:
+            self.assertAlmostEqual(city.building_height(building, building.born), building.target, places=4)
+            self.assertEqual(city.building_height(building, building.born - building.grow - 0.05), 0.0)
+        calm = [building.target for building in city.buildings if building.energy <= 0.35]
+        hot = [building.target for building in city.buildings if building.energy >= 0.55]
+        if len(calm) >= 2 and len(hot) >= 2:
+            self.assertGreater(sum(hot) / len(hot), sum(calm) / len(calm))
+        self.assertEqual(city.timing["max_timing_error_s"], 0.0)
+        self.assertGreater(len(city.bass_times), 0)
+
+        piano = build_scene("piano", 1920, 1080, analysis, 42, "neon")
+        self.assertGreaterEqual(len(piano.notes), 8)
+        for note in piano.notes:
+            x, y = piano.note_head(note, note.time)
+            kx, ky = piano.key_center(note.display)
+            self.assertAlmostEqual(x, kx, places=4)
+            self.assertAlmostEqual(y, ky, places=4)
+            self.assertGreaterEqual(note.duration, 0.12)
+        self.assertEqual(piano.timing["max_timing_error_s"], 0.0)
+        self.assertLess(piano.timing["max_position_error_px"], 1e-4)
+
+        stars = build_scene("stars", 1920, 1080, analysis, 42, "neon")
+        self.assertGreaterEqual(len(stars.stars), 8)
+        self.assertGreater(len(stars.links), 0)
+        for star in stars.stars:
+            self.assertAlmostEqual(stars.brightness(star, star.time), 1.0, places=4)
+            self.assertEqual(stars.brightness(star, star.time - 1.0), 0.0)
+        self.assertEqual(stars.timing["max_timing_error_s"], 0.0)
+
+        renderer = CairoRenderer(640, 360, fps=30)
+        for scene in (city, piano, stars):
+            scene.update(1 / 30, min(1.0, analysis.duration * 0.5), [])
+            frame = renderer.draw(scene)
+            self.assertEqual(len(frame), 640 * 360 * 4)
 
 
 if __name__ == "__main__":

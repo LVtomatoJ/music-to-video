@@ -24,12 +24,17 @@ ASPECTS = {
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="music2video",
-        description="Render a beat-reactive ball animation and mux the original audio into an MP4.",
+        description="Render a beat-synced picture and mux the original audio into an MP4.",
     )
     parser.add_argument("-i", "--input", type=Path, required=True, help="wav, mp3, or anything ffmpeg can read")
     parser.add_argument("-o", "--output", type=Path, required=True, help="destination mp4")
     parser.add_argument("--aspect", choices=sorted(ASPECTS), default="16:9")
-    parser.add_argument("--scene", choices=("map", "balls"), default="map", help="map: one ball through a beat map; balls: the older multi-ball field")
+    parser.add_argument(
+        "--scene",
+        choices=("map", "balls", "city", "piano", "stars"),
+        default="map",
+        help="map: one ball on a beat map; balls: the older multi-ball field; city, piano, stars: other beat-synced forms",
+    )
     parser.add_argument("--fps", type=int, default=30)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--crf", type=int, default=20)
@@ -132,6 +137,10 @@ def render_video(args: argparse.Namespace) -> dict:
             f", hit timing max {timing['max_timing_error_s'] * 1000:.3f} ms"
             f", position {timing['max_position_error_px']:.4f} px"
         )
+    report = getattr(scene, "sync_report", None)
+    if report:
+        detail = ", ".join(f"{key} {value}" for key, value in report.items())
+        extra = f"{extra}, {detail}"
     print(
         f"tempo {analysis.tempo:.2f} BPM, {len(analysis.beats)} beats, "
         f"{len(analysis.strong_beats)} strong, scene {args.scene}, theme {payload['theme']}{extra}, wrote {args.output}"

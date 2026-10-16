@@ -31,7 +31,7 @@ music2video -i song.mp3 -o field.mp4 --scene balls
 | `-i, --input` | wav、mp3，或 ffmpeg 能读的其它音频 |
 | `-o, --output` | 输出的 mp4 |
 | `--aspect` | `16:9` 为 1920×1080，`9:16` 为 1080×1920 |
-| `--scene` | `map`（默认）一颗球走生成的地图；`balls` 是原来的多球场地 |
+| `--scene` | `map`（默认）一颗球走生成的地图；`balls` 是原来的多球场地；`city` 夜城生长，`piano` 音符瀑布，`stars` 星座 |
 | `--theme` | 整支片子只用一种皮肤。`neon` 霓虹、`arcade` 街机、`piano` 琴键、`shatter` 冲击、`pastel` 柔彩。`auto` 按整首歌的能量选一种，不会中途混用 |
 | `--fps` | 默认 30 |
 | `--seed` | 地图走向和障碍种类的随机种子，默认 42 |
@@ -61,6 +61,16 @@ music2video -i song.mp3 -o field.mp4 --scene balls
 
 `--scene balls` 保留原来的多球场地：每拍反向并换色，强拍爆粒子。
 
+另外三种画面不走球和地图，节拍或旋律仍然对齐，并且用同一套成片处理：2 倍分辨率绘制再缩小、柔光、暗角、颗粒，镜头只做阻尼跟随。
+
+| `--scene` | 画面 | 对齐 |
+| --- | --- | --- |
+| `city` | 夜色里一座城市长出来。每一拍立起一栋楼或点亮窗户，低音铺亮整条街，楼有多高跟着这一段的能量。结尾镜头已经拉开，天际线站在画面里 | 楼在拍点上长到预定高度 |
+| `piano` | 像瀑布琴一样，音符落到键盘上，键亮起，长短等于这个音持续了多久 | librosa 的音高、色度和 onset。音头在 onset 上碰到键 |
+| `stars` | 一个音点亮一颗星，一句连成一个星座，夜空慢慢漂，星星轻轻闪 | 星星在音符到来时达到最亮 |
+
+这三支片子不跟 `--theme` 换肤，各用自己的夜色。地图和多球场不受影响。
+
 加一种障碍或撞击效果：在 `music2video/registry.py` 里调用 `register_object` / `register_effect`。加一种皮肤：在 `music2video/themes.py` 里 `register_theme`，写上飞行物、`Feel`、障碍和效果。分析、场景、绘制、编码互不调用。
 
 合成测试曲（126 BPM，节拍时间已知）：
@@ -74,7 +84,7 @@ python -m unittest tests.test_pipeline
 
 | 路径 | 内容 |
 | --- | --- |
-| `music2video/` | 正式 CLI。`analysis.py`、`mapscene.py`、`themes.py`、`registry.py`、`scene.py`、`render.py`、`encode.py`、`cli.py` |
+| `music2video/` | 正式 CLI。`analysis.py`、`notes.py`、`mapscene.py`、`forms.py`、`themes.py`、`registry.py`、`scene.py`、`render.py`、`encode.py`、`cli.py` |
 | `prototypes/python` | librosa + cairo 原型 |
 | `prototypes/web` | Web Audio AnalyserNode + Canvas + WebCodecs |
 | `prototypes/rust` | rustfft + tiny-skia + ffmpeg |

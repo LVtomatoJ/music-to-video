@@ -7,7 +7,7 @@ import math
 import cairo
 import numpy as np
 
-from music2video.registry import BALL_R, OBJECTS, active_palette, bind_palette
+from music2video.registry import BALL_R, OBJECTS, active_palette, bind_palette, bind_palette_name
 from music2video.scene import hsl_to_rgb, Scene
 
 
@@ -60,6 +60,7 @@ class CairoRenderer:
         self.bloom_surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, self.bloom_w, self.bloom_h)
 
     def draw(self, scene) -> bytes:
+        form = getattr(scene, "form", None)
         if hasattr(scene, "obstacles"):
             bind_palette(getattr(scene, "skin", None))
             output = self.ctx
@@ -68,6 +69,22 @@ class CairoRenderer:
             self.ctx.scale(2, 2)
             self.ctx.set_operator(cairo.OPERATOR_SOURCE)
             self._draw_map(scene)
+            self.ctx = output
+            self._downsample()
+            self._bloom()
+            self._caption(scene)
+            self._vignette()
+            self._grain(scene)
+        elif form in {"city", "piano", "stars"}:
+            bind_palette_name(getattr(scene, "palette_name", "neon"))
+            output = self.ctx
+            self.ctx = self.hi_ctx
+            self.ctx.identity_matrix()
+            self.ctx.scale(2, 2)
+            self.ctx.set_operator(cairo.OPERATOR_SOURCE)
+            from music2video.forms import paint_form
+
+            paint_form(self.ctx, scene)
             self.ctx = output
             self._downsample()
             self._bloom()
