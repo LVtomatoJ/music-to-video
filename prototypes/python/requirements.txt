@@ -1,0 +1,4 @@
+numpy>=2
+librosa>=1.0
+pycairo>=1.25
+soundfile>=0.12

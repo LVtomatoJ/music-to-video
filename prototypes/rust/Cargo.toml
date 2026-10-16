@@ -1,0 +1,9 @@
+[package]
+name = "beatballs-rust"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+hound = "3.5"
+rustfft = "6"
+tiny-skia = "0.11"

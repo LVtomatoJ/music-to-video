@@ -1,3 +1,12 @@
+# Local env, generated media, prototype build output
+.venv/
+assets/
+prototypes/out/
+prototypes/web/node_modules/
+prototypes/web/dist/
+prototypes/rust/target/
+*.mp4
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

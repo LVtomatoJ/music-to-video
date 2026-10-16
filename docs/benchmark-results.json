@@ -1,0 +1,215 @@
+{
+  "machine": {
+    "platform": "Linux-6.12.94+-x86_64-with-glibc2.39",
+    "cpu_count": 4,
+    "python": "3.12.3",
+    "ffmpeg": "ffmpeg version 6.1.1-3ubuntu5 Copyright (c) 2000-2023 the FFmpeg developers",
+    "node": "v22.14.0",
+    "rustc": "rustc 1.83.0 (90b35a623 2024-11-26)"
+  },
+  "clip": {
+    "duration_s": 30,
+    "width": 1920,
+    "height": 1080,
+    "fps": 30,
+    "encoder_note": "Python and Rust pipe raw frames to ffmpeg libx264 CRF 20 veryfast. Web uses WebCodecs AVC at 8 Mbps, then ffmpeg copies video and encodes AAC."
+  },
+  "code_nonempty_lines": {
+    "python": 312,
+    "rust": 728,
+    "web": 700
+  },
+  "synthetic": {
+    "python": {
+      "timing": {
+        "analysis_s": 1.7025400329998774,
+        "render_encode_s": 6.949845224000001,
+        "total_s": 8.652385256999878
+      },
+      "tempo": 126.04801829268293,
+      "score": {
+        "tempo_estimate": 126.04801829268293,
+        "tempo_target": 126.0,
+        "tempo_error_bpm": 0.04801829268292579,
+        "beats": {
+          "tp": 61,
+          "fp": 0,
+          "fn": 2,
+          "precision": 1.0,
+          "recall": 0.9682539682539683,
+          "f1": 0.9838709677419354,
+          "reference": 63,
+          "estimate": 61
+        },
+        "strong_beats": {
+          "tp": 25,
+          "fp": 0,
+          "fn": 6,
+          "precision": 1.0,
+          "recall": 0.8064516129032258,
+          "f1": 0.8928571428571428,
+          "reference": 31,
+          "estimate": 25
+        },
+        "intervals": {
+          "median_interval": 0.47600907029478456,
+          "implied_bpm": 126.04801829268293,
+          "cv": 0.0031211482112426516,
+          "regular_fraction": 1.0
+        }
+      },
+      "output": {
+        "duration": 30.0,
+        "size_bytes": 4124241,
+        "bit_rate": 1099797,
+        "video_codec": "h264",
+        "width": 1920,
+        "height": 1080,
+        "fps": "30/1",
+        "nb_frames": 900,
+        "audio_codec": "aac",
+        "sample_rate": 44100,
+        "channels": 1
+      }
+    },
+    "rust": {
+      "timing": {
+        "analysis_s": 0.087185,
+        "render_encode_s": 7.818246,
+        "total_s": 7.905431
+      },
+      "tempo": 123.046875,
+      "score": {
+        "tempo_estimate": 123.046875,
+        "tempo_target": 126.0,
+        "tempo_error_bpm": 2.953125,
+        "beats": {
+          "tp": 62,
+          "fp": 0,
+          "fn": 1,
+          "precision": 1.0,
+          "recall": 0.9841269841269841,
+          "f1": 0.9919999999999999,
+          "reference": 63,
+          "estimate": 62
+        },
+        "strong_beats": {
+          "tp": 31,
+          "fp": 0,
+          "fn": 0,
+          "precision": 1.0,
+          "recall": 1.0,
+          "f1": 1.0,
+          "reference": 31,
+          "estimate": 31
+        },
+        "intervals": {
+          "median_interval": 0.4760090699999999,
+          "implied_bpm": 126.04801837074241,
+          "cv": 0.02046581452389144,
+          "regular_fraction": 1.0
+        }
+      },
+      "output": {
+        "duration": 30.0,
+        "size_bytes": 4702567,
+        "bit_rate": 1254017,
+        "video_codec": "h264",
+        "width": 1920,
+        "height": 1080,
+        "fps": "30/1",
+        "nb_frames": 900,
+        "audio_codec": "aac",
+        "sample_rate": 44100,
+        "channels": 1
+      }
+    },
+    "web": {
+      "timing": {
+        "analysis_s": 0.31310000000009314,
+        "render_encode_s": 11.882410282999906,
+        "total_s": 12.195510282999999
+      },
+      "tempo": 123.046875,
+      "score": {
+        "tempo_estimate": 123.046875,
+        "tempo_target": 126.0,
+        "tempo_error_bpm": 2.953125,
+        "beats": {
+          "tp": 62,
+          "fp": 0,
+          "fn": 1,
+          "precision": 1.0,
+          "recall": 0.9841269841269841,
+          "f1": 0.9919999999999999,
+          "reference": 63,
+          "estimate": 62
+        },
+        "strong_beats": {
+          "tp": 31,
+          "fp": 0,
+          "fn": 0,
+          "precision": 1.0,
+          "recall": 1.0,
+          "f1": 1.0,
+          "reference": 31,
+          "estimate": 31
+        },
+        "intervals": {
+          "median_interval": 0.47600907029478456,
+          "implied_bpm": 126.04801829268293,
+          "cv": 0.019490304300937573,
+          "regular_fraction": 1.0
+        }
+      },
+      "output": {
+        "duration": 30.0,
+        "size_bytes": 22937822,
+        "bit_rate": 6116752,
+        "video_codec": "h264",
+        "width": 1920,
+        "height": 1080,
+        "fps": "30/1",
+        "nb_frames": 900,
+        "audio_codec": "aac",
+        "sample_rate": 44100,
+        "channels": 1
+      }
+    }
+  },
+  "real_excerpt": {
+    "source": "Alex MakeMusic - I Am Good - Instrumental Version.mp3",
+    "seconds": 30,
+    "note": "No beat annotations. Compared by tempo regularity only.",
+    "python": {
+      "analysis_s": 1.9663563689998682,
+      "tempo": 123.046875,
+      "beats": 62,
+      "strong_beats": 26,
+      "median_interval_s": 0.4876190476190476,
+      "implied_bpm": 123.046875,
+      "interval_cv": 0.041891737905484366,
+      "regular_fraction": 0.9508196721311475
+    },
+    "rust": {
+      "analysis_s": 0.105241,
+      "tempo": 120.18531977,
+      "beats": 61,
+      "strong_beats": 24,
+      "median_interval_s": 0.4876190499999993,
+      "implied_bpm": 123.04687439918537,
+      "interval_cv": 0.031611628691931556,
+      "regular_fraction": 0.9833333333333333
+    },
+    "web": {
+      "analysis_s": 0.3399000000001397,
+      "tempo": 120.18531976744185,
+      "beats": 61,
+      "strong_beats": 25,
+      "median_interval_s": 0.4876190476190476,
+      "implied_bpm": 123.046875,
+      "interval_cv": 0.03190864320179315,
+      "regular_fraction": 0.9833333333333333
+    }
+  }
+}
