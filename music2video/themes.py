@@ -48,6 +48,80 @@ class Theme:
     flourish: str = ""
 
 
+@dataclass(frozen=True)
+class Palette:
+    """Screen colors for one skin. Values are linear 0–1 RGB, chosen as a set."""
+
+    bg_top: tuple[float, float, float]
+    bg_bottom: tuple[float, float, float]
+    accent: tuple[float, float, float]
+    accent2: tuple[float, float, float]
+    ink: tuple[float, float, float]
+    rim: tuple[float, float, float]
+    shadow: tuple[float, float, float]
+    vignette: float
+
+
+PALETTES: dict[str, Palette] = {
+    "neon": Palette(
+        (0.043, 0.067, 0.133),
+        (0.012, 0.016, 0.043),
+        (0.361, 0.902, 0.886),
+        (0.965, 0.286, 0.541),
+        (0.055, 0.094, 0.149),
+        (0.780, 1.000, 0.965),
+        (0.000, 0.000, 0.000),
+        0.46,
+    ),
+    "arcade": Palette(
+        (0.110, 0.051, 0.133),
+        (0.035, 0.012, 0.055),
+        (1.000, 0.784, 0.341),
+        (1.000, 0.302, 0.545),
+        (0.220, 0.118, 0.275),
+        (1.000, 0.910, 0.655),
+        (0.000, 0.000, 0.000),
+        0.42,
+    ),
+    "piano": Palette(
+        (0.125, 0.098, 0.078),
+        (0.047, 0.035, 0.027),
+        (0.949, 0.902, 0.816),
+        (0.776, 0.631, 0.357),
+        (0.965, 0.941, 0.902),
+        (1.000, 0.996, 0.980),
+        (0.040, 0.024, 0.016),
+        0.38,
+    ),
+    "shatter": Palette(
+        (0.110, 0.086, 0.078),
+        (0.035, 0.027, 0.024),
+        (0.949, 0.910, 0.867),
+        (0.886, 0.345, 0.259),
+        (0.890, 0.855, 0.816),
+        (1.000, 0.980, 0.960),
+        (0.000, 0.000, 0.000),
+        0.50,
+    ),
+    "pastel": Palette(
+        (0.965, 0.937, 0.910),
+        (0.855, 0.765, 0.835),
+        (0.761, 0.337, 0.478),
+        (0.365, 0.612, 0.569),
+        (0.945, 0.835, 0.870),
+        (1.000, 0.980, 0.973),
+        (0.620, 0.310, 0.420),
+        0.22,
+    ),
+}
+
+
+def palette_of(theme: Theme | None) -> Palette:
+    if theme is None:
+        return PALETTES["neon"]
+    return PALETTES.get(theme.name, PALETTES["neon"])
+
+
 THEMES: dict[str, Theme] = {}
 
 

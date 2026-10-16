@@ -12,7 +12,10 @@ import math
 from dataclasses import dataclass
 from typing import Callable
 
+import cairo
+
 from music2video.scene import hsl_to_rgb
+from music2video.themes import palette_of
 
 BALL_R = 28.0
 
@@ -278,13 +281,121 @@ def _place(ctx, obs: Obstacle) -> None:
     ctx.rotate(math.atan2(obs.ny, obs.nx))
 
 
+_PALETTE = None
+
+
+def bind_palette(theme) -> None:
+    global _PALETTE
+    _PALETTE = palette_of(theme)
+
+
+def active_palette():
+    return _PALETTE if _PALETTE is not None else palette_of(None)
+
+
+def _ease_flash(flash: float) -> float:
+    u = max(0.0, min(1.0, flash))
+    return u * u * (3.0 - 2.0 * u)
+
+
+def _mix(a: tuple[float, float, float], b: tuple[float, float, float], t: float) -> tuple[float, float, float]:
+    return (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t)
+
+
 def _color(hue: float, sat: float, light: float, flash: float) -> tuple[float, float, float]:
-    return hsl_to_rgb(hue, sat, min(0.94, light + 0.28 * flash))
+    return hsl_to_rgb(hue, sat, min(0.94, light + 0.28 * _ease_flash(flash)))
 
 
 def _body(obs: Obstacle, hue: float, lit: bool) -> tuple[float, float, float]:
     light = obs.light if lit else obs.light * 0.72
     return _color(hue, obs.sat, light, obs.flash)
+
+
+def _ink(obs: Obstacle, hue: float) -> tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float], float]:
+    """Body, rim, shadow, and the eased hit glow in the active palette."""
+    glow = _ease_flash(obs.flash)
+    pal = active_palette()
+    shift = ((hue % 48.0) / 48.0) * 0.22
+    color = _mix(pal.ink, pal.accent2, shift)
+    if obs.lit:
+        color = _mix(color, pal.accent, 0.18 + 0.45 * glow)
+    else:
+        color = _mix(color, pal.bg_bottom, 0.28)
+    return color, pal.rim, pal.shadow, glow
+
+
+def _round_rect(ctx, x: float, y: float, w: float, h: float, radius: float) -> None:
+    radius = max(0.0, min(radius, abs(w) * 0.5, abs(h) * 0.5))
+    if radius < 0.6:
+        ctx.rectangle(x, y, w, h)
+        return
+    ctx.new_sub_path()
+    ctx.arc(x + w - radius, y + radius, radius, -math.pi / 2, 0)
+    ctx.arc(x + w - radius, y + h - radius, radius, 0, math.pi / 2)
+    ctx.arc(x + radius, y + h - radius, radius, math.pi / 2, math.pi)
+    ctx.arc(x + radius, y + radius, radius, math.pi, 3 * math.pi / 2)
+    ctx.close_path()
+
+
+def _paint_slab(ctx, x, y, w, h, color, rim, shadow, alpha, glow, radius) -> None:
+    """Rounded body, soft shadow, inner gradient, and a thin contact highlight."""
+    if w <= 0.5 or h <= 0.5 or alpha <= 0.01:
+        return
+    ctx.save()
+    for offset, shade in ((8.0, 0.10), (3.5, 0.16)):
+        ctx.set_source_rgba(*shadow, alpha * shade)
+        _round_rect(ctx, x + offset * 0.45, y + offset * 0.7, w, h, radius)
+        ctx.fill()
+    if glow > 0.05:
+        ctx.set_source_rgba(*rim, alpha * 0.16 * glow)
+        _round_rect(ctx, x - 3.0, y - 3.0, w + 6.0, h + 6.0, radius + 3.0)
+        ctx.fill()
+    grad = cairo.LinearGradient(x, y, x + w, y + h * 0.15)
+    lit = tuple(min(1.0, channel + 0.14 + 0.18 * glow) for channel in color)
+    deep = tuple(channel * 0.58 for channel in color)
+    grad.add_color_stop_rgba(0.0, *lit, alpha)
+    grad.add_color_stop_rgba(1.0, *deep, alpha)
+    ctx.set_source(grad)
+    _round_rect(ctx, x, y, w, h, radius)
+    ctx.fill()
+    ctx.set_source_rgba(*rim, alpha * (0.22 + 0.5 * glow))
+    ctx.set_line_width(1.25)
+    inset = 1.3
+    _round_rect(ctx, x + inset, y + inset, max(1.0, w - inset * 2), max(1.0, h - inset * 2), max(0.0, radius - inset))
+    ctx.stroke()
+    ctx.set_source_rgba(1, 1, 1, alpha * (0.38 + 0.5 * glow))
+    ctx.set_line_width(1.7)
+    ctx.move_to(x + 1.1, y + radius)
+    ctx.line_to(x + 1.1, y + h - radius)
+    ctx.stroke()
+    ctx.restore()
+
+
+def _paint_disk(ctx, cx, cy, radius, color, rim, shadow, alpha, glow) -> None:
+    ctx.set_source_rgba(*shadow, alpha * 0.22)
+    ctx.arc(cx + radius * 0.12, cy + radius * 0.16, radius, 0, math.tau)
+    ctx.fill()
+    if glow > 0.04:
+        halo = cairo.RadialGradient(cx, cy, radius * 0.4, cx, cy, radius * (1.55 + 0.35 * glow))
+        halo.add_color_stop_rgba(0, *rim, alpha * 0.28 * glow)
+        halo.add_color_stop_rgba(1, *rim, 0)
+        ctx.set_source(halo)
+        ctx.arc(cx, cy, radius * (1.55 + 0.35 * glow), 0, math.tau)
+        ctx.fill()
+    grad = cairo.RadialGradient(cx - radius * 0.32, cy - radius * 0.38, radius * 0.08, cx, cy, radius)
+    grad.add_color_stop_rgba(0.0, 1, 1, 1, alpha)
+    grad.add_color_stop_rgba(0.28, *tuple(min(1.0, c + 0.12) for c in color), alpha)
+    grad.add_color_stop_rgba(1.0, *tuple(c * 0.55 for c in color), alpha)
+    ctx.set_source(grad)
+    ctx.arc(cx, cy, radius, 0, math.tau)
+    ctx.fill()
+    ctx.set_source_rgba(1, 1, 1, alpha * (0.75 + 0.2 * glow))
+    ctx.arc(cx - radius * 0.30, cy - radius * 0.34, radius * 0.16, 0, math.tau)
+    ctx.fill()
+    ctx.set_source_rgba(*rim, alpha * (0.35 + 0.4 * glow))
+    ctx.set_line_width(1.4)
+    ctx.arc(cx, cy, radius - 0.6, 0, math.tau)
+    ctx.stroke()
 
 
 def draw_wall(ctx, obs: Obstacle, time: float, alpha: float, hue: float) -> None:
@@ -294,33 +405,41 @@ def draw_wall(ctx, obs: Obstacle, time: float, alpha: float, hue: float) -> None
     length = obs.size
     variant = obs.variant
     thick = 14 if variant == "short" else 18
+    color, rim, shadow, glow = _ink(obs, hue)
     ctx.save()
     _place(ctx, obs)
-    red, green, blue = _body(obs, hue, obs.lit)
-    ctx.set_source_rgba(red, green, blue, alpha)
-    ctx.rectangle(0, -length / 2, thick, length)
-    ctx.fill()
+    radius = min(7.0, thick * 0.42)
+    _paint_slab(ctx, 0, -length / 2, thick, length, color, rim, shadow, alpha, glow, radius)
     if variant == "double":
-        ctx.rectangle(thick + 16, -length * 0.42, thick * 0.75, length * 0.84)
-        ctx.fill()
+        _paint_slab(
+            ctx,
+            thick + 16,
+            -length * 0.42,
+            thick * 0.75,
+            length * 0.84,
+            color,
+            rim,
+            shadow,
+            alpha * 0.95,
+            glow,
+            radius,
+        )
     if variant == "corner":
         arm = max(54.0, length * 0.42)
-        ctx.rectangle(0, length / 2 - thick, arm, thick)
-        ctx.fill()
-    ctx.set_source_rgba(1, 1, 1, alpha * (0.85 if obs.lit else 0.25))
-    ctx.set_line_width(3)
-    ctx.move_to(0, -length / 2)
-    ctx.line_to(0, length / 2)
-    ctx.stroke()
-    if variant == "double":
-        ctx.move_to(thick + 16, -length * 0.42)
-        ctx.line_to(thick + 16, length * 0.42)
-        ctx.stroke()
-    if variant == "corner":
-        ctx.move_to(0, length / 2 - thick / 2)
-        ctx.line_to(max(54.0, length * 0.42), length / 2 - thick / 2)
-        ctx.stroke()
+        _paint_slab(ctx, 0, length / 2 - thick, arm, thick, color, rim, shadow, alpha, glow, radius)
     ctx.restore()
+
+
+def _arch_path(ctx, length: float, shift: float) -> None:
+    ctx.move_to(length * 0.18 + shift, -length / 2)
+    ctx.curve_to(
+        -length * 0.06 + shift,
+        -length * 0.18,
+        -length * 0.06 + shift,
+        length * 0.18,
+        length * 0.18 + shift,
+        length / 2,
+    )
 
 
 def draw_platform(ctx, obs: Obstacle, time: float, alpha: float, hue: float) -> None:
@@ -329,28 +448,30 @@ def draw_platform(ctx, obs: Obstacle, time: float, alpha: float, hue: float) -> 
         return
     length = obs.size
     thick = 16 if obs.variant == "short" else 22
+    color, rim, shadow, glow = _ink(obs, hue)
     ctx.save()
     _place(ctx, obs)
-    red, green, blue = _body(obs, hue, obs.lit)
-    ctx.set_source_rgba(red, green, blue, alpha)
+    ctx.set_line_cap(cairo.LINE_CAP_ROUND)
     if obs.variant == "arch":
-        # Crown sits on the contact point. The body bows back into the platform.
+        # Same centerline as the collision stroke. A soft shadow and a rim sit around it.
         shift = arch_offset(length, thick)
+        ctx.set_line_width(thick + 14)
+        ctx.set_source_rgba(*shadow, alpha * 0.16)
+        _arch_path(ctx, length, shift + 3)
+        ctx.stroke()
         ctx.set_line_width(thick)
-        ctx.set_line_cap(1)
-        ctx.move_to(length * 0.18 + shift, -length / 2)
-        ctx.curve_to(-length * 0.06 + shift, -length * 0.18, -length * 0.06 + shift, length * 0.18, length * 0.18 + shift, length / 2)
+        ctx.set_source_rgba(*color, alpha)
+        _arch_path(ctx, length, shift)
+        ctx.stroke()
+        ctx.set_line_width(2.0)
+        ctx.set_source_rgba(*rim, alpha * (0.4 + 0.45 * glow))
+        _arch_path(ctx, length, shift)
         ctx.stroke()
     else:
-        ctx.rectangle(0, -length / 2, thick, length)
-        ctx.fill()
-        ctx.set_source_rgba(1, 1, 1, alpha * (0.9 if obs.lit else 0.35))
-        ctx.rectangle(0, -length / 2, 4, length)
-        ctx.fill()
-        ctx.set_source_rgba(red, green, blue, alpha * 0.85)
+        radius = min(8.0, thick * 0.4)
+        _paint_slab(ctx, 0, -length / 2, thick, length, color, rim, shadow, alpha, glow, radius)
         for foot in (-length * 0.32, length * 0.32):
-            ctx.rectangle(thick * 0.35, foot - 5, thick * 1.3, 10)
-            ctx.fill()
+            _paint_slab(ctx, thick * 0.35, foot - 5, thick * 1.3, 10, color, rim, shadow, alpha * 0.9, glow, 4.0)
     ctx.restore()
 
 
@@ -360,23 +481,12 @@ def draw_peg(ctx, obs: Obstacle, time: float, alpha: float, hue: float) -> None:
         return
     cx = obs.x + obs.nx * (BALL_R + obs.peg_r)
     cy = obs.y + obs.ny * (BALL_R + obs.peg_r)
-    red, green, blue = _body(obs, hue, obs.lit)
-    ctx.set_source_rgba(red, green, blue, alpha)
+    color, rim, shadow, glow = _ink(obs, hue)
     disks = [(cx, cy, obs.peg_r)]
     if obs.variant == "pair":
         disks.append((cx + obs.tx * obs.peg_r * 2.4, cy + obs.ty * obs.peg_r * 2.4, obs.peg_r * 0.78))
     for disk_x, disk_y, radius in disks:
-        ctx.set_source_rgba(red, green, blue, alpha)
-        ctx.arc(disk_x, disk_y, radius, 0, math.tau)
-        ctx.fill()
-        ctx.set_source_rgba(0.05, 0.06, 0.09, alpha)
-        ctx.arc(disk_x, disk_y, radius * 0.38, 0, math.tau)
-        ctx.fill()
-        if obs.lit:
-            ctx.set_source_rgba(1, 1, 1, alpha * 0.8 * max(obs.flash, 0.25))
-            ctx.set_line_width(3)
-            ctx.arc(disk_x, disk_y, radius + 3, 0, math.tau)
-            ctx.stroke()
+        _paint_disk(ctx, disk_x, disk_y, radius, color, rim, shadow, alpha, glow)
 
 
 def draw_pad(ctx, obs: Obstacle, time: float, alpha: float, hue: float) -> None:
@@ -385,21 +495,30 @@ def draw_pad(ctx, obs: Obstacle, time: float, alpha: float, hue: float) -> None:
         return
     length = obs.size
     thick = 28 + (10 if obs.strong else 0)
+    color, rim, shadow, glow = _ink(obs, hue)
     ctx.save()
     _place(ctx, obs)
-    red, green, blue = _body(obs, hue, obs.lit)
-    ctx.set_source_rgba(red, green, blue, alpha)
+    ctx.set_line_cap(cairo.LINE_CAP_ROUND)
+    # Shadow, body, then a contact highlight. The body centerline stays at half thickness.
+    ctx.set_line_width(thick + 10)
+    ctx.set_source_rgba(*shadow, alpha * 0.16)
+    ctx.move_to(thick * 0.5 + 3, -length / 2)
+    ctx.line_to(thick * 0.5 + 3, length / 2)
+    ctx.stroke()
     ctx.set_line_width(thick)
-    ctx.set_line_cap(1)
-    # The stroke is centered on the path. Half the thickness lands on the contact plane.
+    ctx.set_source_rgba(*color, alpha)
     ctx.move_to(thick * 0.5, -length / 2)
     ctx.line_to(thick * 0.5, length / 2)
     ctx.stroke()
-    ctx.set_source_rgba(1, 1, 1, alpha * 0.7)
-    ctx.set_line_width(4)
-    ctx.move_to(6, -length * 0.22)
-    ctx.line_to(thick * 0.55, 0)
-    ctx.line_to(6, length * 0.22)
+    ctx.set_line_width(2.0)
+    ctx.set_source_rgba(*rim, alpha * (0.45 + 0.4 * glow))
+    ctx.move_to(2.2, -length * 0.42)
+    ctx.line_to(2.2, length * 0.42)
+    ctx.stroke()
+    ctx.set_source_rgba(1, 1, 1, alpha * (0.35 + 0.4 * glow))
+    ctx.move_to(thick * 0.42, -length * 0.16)
+    ctx.line_to(thick * 0.72, 0)
+    ctx.line_to(thick * 0.42, length * 0.16)
     ctx.stroke()
     ctx.restore()
 
@@ -410,44 +529,43 @@ def draw_breakable(ctx, obs: Obstacle, time: float, alpha: float, hue: float) ->
         return
     side = obs.size
     variant = obs.variant
+    color, rim, shadow, glow = _ink(obs, hue)
+    body_alpha = alpha * (0.62 if obs.broken else 1.0)
     ctx.save()
     _place(ctx, obs)
-    red, green, blue = _body(obs, hue, obs.lit or obs.broken)
-    if obs.broken:
-        ctx.set_source_rgba(red, green, blue, alpha * 0.35)
-        ctx.arc(side * 0.35, 0, side * (0.55 if obs.flourish else 0.4), 0, math.tau)
-        ctx.fill()
-    elif variant == "crack":
-        ctx.set_source_rgba(red, green, blue, alpha)
-        ctx.rectangle(0, -side, 12, side * 2)
-        ctx.fill()
-        ctx.set_source_rgba(0.15, 0.05, 0.05, alpha * 0.85)
-        ctx.set_line_width(2)
-        ctx.move_to(6, -side)
-        ctx.line_to(9, -side * 0.35)
-        ctx.line_to(3, side * 0.05)
-        ctx.line_to(8, side)
+    if variant == "crack":
+        _paint_slab(ctx, 0, -side, 12, side * 2, color, rim, shadow, body_alpha, glow, 5.0)
+        ctx.set_source_rgba(*active_palette().accent2, body_alpha * 0.8)
+        ctx.set_line_width(1.4)
+        ctx.move_to(6, -side * 0.7)
+        ctx.line_to(8, -side * 0.2)
+        ctx.line_to(4, side * 0.15)
+        ctx.line_to(7, side * 0.7)
         ctx.stroke()
     elif variant == "stack":
-        ctx.set_source_rgba(red, green, blue, alpha)
         block_h = side * 0.42
         for slot in (-1, 0, 1):
-            ctx.rectangle(0, slot * (block_h + 8) - block_h / 2, side * 0.9, block_h)
-            ctx.fill()
-        if obs.lit:
-            ctx.set_source_rgba(1, 1, 1, alpha * 0.35)
-            ctx.rectangle(0, -block_h / 2, side * 0.9, block_h)
-            ctx.fill()
+            _paint_slab(
+                ctx,
+                0,
+                slot * (block_h + 8) - block_h / 2,
+                side * 0.9,
+                block_h,
+                color,
+                rim,
+                shadow,
+                body_alpha,
+                glow if slot == 0 else glow * 0.4,
+                5.0,
+            )
     else:
-        ctx.set_source_rgba(red, green, blue, alpha)
-        ctx.rectangle(0, -side / 2, side, side)
-        ctx.fill()
-        ctx.set_source_rgba(1, 1, 1, alpha * 0.35)
-        ctx.set_line_width(2)
-        ctx.move_to(0, 0)
-        ctx.line_to(side, -side / 2)
-        ctx.move_to(side * 0.3, -side / 2)
-        ctx.line_to(side * 0.7, side / 2)
+        _paint_slab(ctx, 0, -side / 2, side, side, color, rim, shadow, body_alpha, glow, 8.0)
+        ctx.set_source_rgba(*active_palette().accent2, body_alpha * 0.55)
+        ctx.set_line_width(1.3)
+        ctx.move_to(side * 0.2, -side * 0.15)
+        ctx.line_to(side * 0.72, -side * 0.28)
+        ctx.move_to(side * 0.28, side * 0.05)
+        ctx.line_to(side * 0.7, side * 0.22)
         ctx.stroke()
     ctx.restore()
 
@@ -458,23 +576,14 @@ def draw_spinner(ctx, obs: Obstacle, time: float, alpha: float, hue: float) -> N
     length = obs.size * (0.7 if obs.variant == "short" else 1.35 if obs.variant == "long" else 1.0)
     thick = 22 if obs.variant == "short" else 14
     cx, cy = contact(obs)
-    # Tangent at the beat, then spin. Local +y points back at the ball, so the
-    # bar sits on the far side of the contact point.
+    # Tangent at the beat, then spin. The bar sits on the far side of the contact.
     angle = math.atan2(obs.ty, obs.tx) + obs.spin * (time - obs.hit_time)
+    color, rim, shadow, glow = _ink(obs, hue)
     ctx.save()
     ctx.translate(cx, cy)
     ctx.rotate(angle)
-    red, green, blue = _body(obs, hue, obs.lit)
-    ctx.set_source_rgba(red, green, blue, alpha)
-    ctx.rectangle(-length / 2, -thick, length, thick)
-    ctx.fill()
-    ctx.set_source_rgba(1, 1, 1, alpha * 0.85)
-    ctx.arc(0, 0, 6, 0, math.tau)
-    ctx.fill()
-    ctx.set_source_rgba(red, green, blue, alpha)
-    ctx.arc(-length / 2, -thick / 2, thick / 2, 0, math.tau)
-    ctx.arc(length / 2, -thick / 2, thick / 2, 0, math.tau)
-    ctx.fill()
+    _paint_slab(ctx, -length / 2, -thick, length, thick, color, rim, shadow, alpha, glow, min(7.0, thick * 0.45))
+    _paint_disk(ctx, 0, -thick / 2, 5.5, color, rim, shadow, alpha, glow)
     ctx.restore()
 
 
@@ -491,6 +600,7 @@ def draw_piano(ctx, obs: Obstacle, time: float, alpha: float, hue: float) -> Non
     key_h = key_w * (3.1 if obs.variant == "single" else 2.6)
     gap = 3.0
     age = time - obs.hit_time if obs.lit else -1.0
+    color, rim, shadow, glow = _ink(obs, hue)
     ctx.save()
     _place(ctx, obs)
     for order, index in enumerate(indices):
@@ -499,20 +609,28 @@ def draw_piano(ctx, obs: Obstacle, time: float, alpha: float, hue: float) -> Non
         stagger = order * 0.06 if obs.flourish else 0.0
         key_lit = obs.lit and age + 1e-6 >= stagger
         height = key_h * (0.62 if black else 1.0)
-        if key_lit and (index == 0 or obs.flourish):
-            red, green, blue = _body(obs, hue, True)
-        elif black:
-            red, green, blue = (0.16, 0.16, 0.18)
+        if black:
+            key_color = (0.12, 0.11, 0.13)
+            key_rim = (0.35, 0.33, 0.36)
+        elif key_lit and (index == 0 or obs.flourish):
+            key_color = _mix(color, active_palette().accent2, 0.35 + 0.4 * glow)
+            key_rim = rim
         else:
-            light = 0.92 if index != 0 else 0.74
-            red, green, blue = (light, light, light * 0.96)
-        ctx.set_source_rgba(red, green, blue, alpha)
-        ctx.rectangle(0, local_y - key_w / 2, height, key_w)
-        ctx.fill()
-        ctx.set_source_rgba(0.08, 0.08, 0.1, alpha * 0.7)
-        ctx.set_line_width(2)
-        ctx.rectangle(0, local_y - key_w / 2, height, key_w)
-        ctx.stroke()
+            key_color = color
+            key_rim = rim
+        _paint_slab(
+            ctx,
+            0,
+            local_y - key_w / 2,
+            height,
+            key_w - 1.2,
+            key_color,
+            key_rim,
+            shadow,
+            alpha,
+            glow if key_lit else 0.0,
+            min(4.0, key_w * 0.22),
+        )
     ctx.restore()
 
 

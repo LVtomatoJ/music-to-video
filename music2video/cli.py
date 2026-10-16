@@ -46,6 +46,8 @@ def build_parser() -> argparse.ArgumentParser:
         default="neon",
         help="one visual skin for the whole video; auto picks from section energy",
     )
+    parser.add_argument("--title", default="", help="optional corner title; hidden when empty")
+    parser.add_argument("--artist", default="", help="optional corner credit under the title; hidden when empty")
     parser.add_argument("--dump-beats", type=Path, default=None, help="write detected beats as JSON")
     return parser
 
@@ -73,7 +75,10 @@ def render_video(args: argparse.Namespace) -> dict:
         analysis = analyze(args.input, Path(tmp), max_seconds=args.max_seconds, beat_mode=args.beat_mode)
         theme = pick_theme(analysis) if args.theme == "auto" else args.theme
         scene = build_scene(args.scene, width, height, analysis, args.seed, theme)
-        renderer = CairoRenderer(width, height)
+        if hasattr(scene, "caption_title"):
+            scene.caption_title = args.title
+            scene.caption_artist = args.artist
+        renderer = CairoRenderer(width, height, fps=args.fps)
         encoder = FfmpegEncoder(args.output, width, height, args.fps, analysis.wav_path, crf=args.crf)
         flags = strong_flags(analysis.beats, analysis.strong_beats)
         nframes = int(math.floor(analysis.duration * args.fps + 1e-6))

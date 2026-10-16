@@ -119,6 +119,9 @@ class MapScene:
         self.pos = (0.0, 0.0)
         self.cam_x = 0.0
         self.cam_y = 0.0
+        self.cam_zoom = 1.0
+        self.caption_title = ""
+        self.caption_artist = ""
         self.shake = 0.0
         self.squash = 0.0
         self.squash_nx = 1.0
@@ -360,12 +363,17 @@ class MapScene:
         section = section_at(self.analysis.sections if self.analysis else (), time)
         self.section_energy = section.energy
         vx, vy = self.velocity_at(time)
-        # Ease the camera. A hard velocity jump at a bounce must not yank the frame.
-        target_x = self.pos[0] + vx * 0.02
-        target_y = self.pos[1] + vy * 0.02
-        blend = 1.0 - math.exp(-10.0 * dt)
+        # Damped follow with a short lookahead. The blend is slow enough that a
+        # bounce does not snap the frame, and the zoom only breathes with energy.
+        look = 0.16
+        target_x = self.pos[0] + vx * look
+        target_y = self.pos[1] + vy * look
+        blend = 1.0 - math.exp(-3.6 * dt)
         self.cam_x += (target_x - self.cam_x) * blend
         self.cam_y += (target_y - self.cam_y) * blend
+        target_zoom = 1.0 + 0.055 * self.section_energy + 0.028 * self.sample_rms(time)
+        zblend = 1.0 - math.exp(-2.0 * dt)
+        self.cam_zoom += (target_zoom - self.cam_zoom) * zblend
         if self.skin is not None:
             self.theme_hue = self.skin.hue
         self._integrate(dt)
@@ -381,8 +389,11 @@ class MapScene:
         self.morph *= math.exp(-3.5 * dt)
         self.hue_jump *= math.exp(-4.5 * dt)
         self.bg_flash *= fade
+        # Hit light lasts about 300ms and eases out (the draw samples smoothstep).
+        step = dt / 0.30
         for obs in self.obstacles:
-            obs.flash *= fade
+            if obs.flash > 0.0:
+                obs.flash = max(0.0, obs.flash - step)
 
     def _spring(self, dt: float) -> None:
         """Deformation spring. The center stays on the planned path.
@@ -455,8 +466,8 @@ class MapScene:
         for spark in self.sparks:
             spark.x += spark.vx * dt
             spark.y += spark.vy * dt
-            spark.vx *= 0.98
-            spark.vy = spark.vy * 0.98 + (240 if spark.shape == "fragment" else 20) * dt
+            spark.vx *= 0.985
+            spark.vy = spark.vy * 0.985 + (210 if spark.shape == "fragment" else 90) * dt
             spark.life -= dt
             spark.spin += spark.spin_v * dt
             if spark.life > 0:
