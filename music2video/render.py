@@ -354,7 +354,7 @@ class CairoRenderer:
         ctx = self.ctx
         time = scene.time
         for obs in scene.obstacles:
-            alpha = _obstacle_alpha(obs, time)
+            alpha = _obstacle_alpha(obs, time) * _presence(obs, scene)
             if alpha <= 0.02:
                 continue
             hue = (scene.theme_hue + obs.kind_hue) % 360
@@ -413,26 +413,37 @@ class CairoRenderer:
             squash_gain = 0.35 + 0.55 * feel.squash
             stretch = feel.stretch
         squash = scene.squash
-        sx = max(0.55, min(1.25, 1.0 - squash_gain * squash))
-        sy = max(0.7, min(1.45, 1.0 + stretch * squash * 0.45))
-        # Face the segment tangent the whole way between hits. Squash scales
-        # around the contact center and must not slide the sprite off the path.
+        # Face the segment tangent the whole way between hits. Scale stays
+        # centered on the contact so the sprite does not leave the path.
         kind = scene.skin.projectile if scene.skin is not None else "bubble"
+        # A circle that is scaled differently on each axis becomes an oval.
+        # Bubbles and pinballs stay round; the arrow, note, and block may still
+        # squash along the flight, which is the shape of those skins.
+        if kind in {"bubble", "pinball"}:
+            puff = max(-0.25, min(1.0, squash))
+            sx = sy = max(0.97, min(1.07, 1.0 + 0.06 * puff))
+            round_body = True
+        else:
+            sx = max(0.55, min(1.25, 1.0 - squash_gain * squash))
+            sy = max(0.7, min(1.45, 1.0 + stretch * squash * 0.45))
+            round_body = False
         paint = _PROJECTILES[kind]
         frame = 1.0 / self.fps
-        for ghost in range(4, 0, -1):
-            when = scene.time - frame * (ghost / 4.0)
-            gx, gy = scene.position_at(when)
-            gvx, gvy = scene.velocity_at(when)
-            ctx.save()
-            ctx.translate(gx, gy)
-            ctx.rotate(math.atan2(gvy, gvx))
-            paint(ctx, scene, 0.05 + 0.035 * (4 - ghost))
-            ctx.restore()
+        if not round_body:
+            for ghost in range(4, 0, -1):
+                when = scene.time - frame * (ghost / 4.0)
+                gx, gy = scene.position_at(when)
+                gvx, gvy = scene.velocity_at(when)
+                ctx.save()
+                ctx.translate(gx, gy)
+                ctx.rotate(math.atan2(gvy, gvx))
+                paint(ctx, scene, 0.05 + 0.035 * (4 - ghost))
+                ctx.restore()
         vx, vy = scene.velocity_at(scene.time)
+        pulse = max(0.0, min(1.0, squash))
         ctx.save()
         ctx.translate(*scene.pos)
-        _paint_halo(ctx, scene)
+        _paint_halo(ctx, scene, 1.0 + (0.85 * pulse if round_body else 0.0))
         ctx.rotate(math.atan2(vy, vx))
         ctx.scale(sx, sy)
         paint(ctx, scene, 1.0)
@@ -544,12 +555,12 @@ def _draw_trail(ctx, scene, fps: int) -> None:
     ctx.fill()
 
 
-def _paint_halo(ctx, scene) -> None:
+def _paint_halo(ctx, scene, strength: float = 1.0) -> None:
     pal = active_palette()
-    radius = BALL_R * 1.85
+    radius = BALL_R * (1.85 + 0.35 * max(0.0, strength - 1.0))
     halo = cairo.RadialGradient(0, 0, BALL_R * 0.2, 0, 0, radius)
-    halo.add_color_stop_rgba(0, *pal.accent, 0.22)
-    halo.add_color_stop_rgba(0.45, *pal.accent2, 0.07)
+    halo.add_color_stop_rgba(0, *pal.accent, 0.22 * strength)
+    halo.add_color_stop_rgba(0.45, *pal.accent2, 0.07 * strength)
     halo.add_color_stop_rgba(1, *pal.accent, 0)
     ctx.set_source(halo)
     ctx.arc(0, 0, radius, 0, math.tau)
@@ -557,22 +568,32 @@ def _paint_halo(ctx, scene) -> None:
 
 
 def _paint_bubble(ctx, scene, alpha: float = 1.0) -> None:
-    del scene
     pal = active_palette()
     radius = BALL_R
+    pulse = max(0.0, min(1.0, getattr(scene, "squash", 0.0)))
+    ease = pulse * pulse * (3.0 - 2.0 * pulse)
+    if ease > 0.04 and alpha > 0.5:
+        ring = radius * (1.28 + 0.85 * (1.0 - ease))
+        band = cairo.RadialGradient(0, 0, ring * 0.78, 0, 0, ring)
+        band.add_color_stop_rgba(0.0, *pal.accent, 0.0)
+        band.add_color_stop_rgba(0.62, *pal.accent, 0.34 * ease * alpha)
+        band.add_color_stop_rgba(1.0, *pal.accent2, 0.0)
+        ctx.set_source(band)
+        ctx.arc(0, 0, ring, 0, math.tau)
+        ctx.fill()
     body = cairo.RadialGradient(-radius * 0.32, -radius * 0.36, radius * 0.08, 0, 0, radius)
-    body.add_color_stop_rgba(0.0, 1, 1, 1, 0.95 * alpha)
+    body.add_color_stop_rgba(0.0, 1, 1, 1, (0.95 + 0.05 * ease) * alpha)
     body.add_color_stop_rgba(0.32, *pal.ink, 0.62 * alpha)
-    body.add_color_stop_rgba(0.72, *pal.accent, 0.34 * alpha)
+    body.add_color_stop_rgba(0.72, *pal.accent, (0.34 + 0.2 * ease) * alpha)
     body.add_color_stop_rgba(1.0, *pal.accent2, 0.12 * alpha)
     ctx.set_source(body)
     ctx.arc(0, 0, radius, 0, math.tau)
     ctx.fill()
-    ctx.set_source_rgba(*pal.rim, 0.72 * alpha)
+    ctx.set_source_rgba(*pal.rim, (0.72 + 0.2 * ease) * alpha)
     ctx.set_line_width(1.25)
     ctx.arc(0, 0, radius - 0.9, 0, math.tau)
     ctx.stroke()
-    ctx.set_source_rgba(1, 1, 1, 0.8 * alpha)
+    ctx.set_source_rgba(1, 1, 1, (0.8 + 0.2 * ease) * alpha)
     ctx.arc(-radius * 0.30, -radius * 0.34, radius * 0.15, 0, math.tau)
     ctx.fill()
 
@@ -695,3 +716,40 @@ def _obstacle_alpha(obs, time: float) -> float:
         return 0.0
     u = 1.0 - lead / 0.85
     return u * u * (3.0 - 2.0 * u) * 0.94
+
+
+def _presence(obs, scene) -> float:
+    """Fade a bar once it leaves the frame, and thin the oldest if the view is full.
+
+    The contact the flyer is hitting stays opaque. Extra old bars dissolve
+    instead of stacking into a thicket.
+    """
+    zoom = max(0.5, getattr(scene, "cam_zoom", 1.0) or 1.0)
+    half_w = scene.width * 0.5 / zoom
+    half_h = scene.height * 0.5 / zoom
+    edge = max(abs(obs.x - scene.cam_x) / half_w, abs(obs.y - scene.cam_y) / half_h)
+    if edge > 1.22:
+        return 0.0
+    if edge < 0.8:
+        edge_fade = 1.0
+    else:
+        edge_fade = _smooth((1.22 - edge) / 0.42)
+    visible = []
+    for other in scene.obstacles:
+        if other.hit_time > scene.time + 0.85:
+            continue
+        if abs(other.x - scene.cam_x) > half_w or abs(other.y - scene.cam_y) > half_h:
+            continue
+        visible.append(other)
+    cap = 5
+    if len(visible) <= cap:
+        return edge_fade
+    visible.sort(key=lambda item: item.hit_time, reverse=True)
+    try:
+        rank = visible.index(obs)
+    except ValueError:
+        return edge_fade
+    if rank < cap:
+        return edge_fade
+    fade = 1.0 - (rank - cap + 1) / (len(visible) - cap + 1)
+    return edge_fade * max(0.0, fade) * 0.22

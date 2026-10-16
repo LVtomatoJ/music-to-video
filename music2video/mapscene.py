@@ -6,13 +6,17 @@ import math
 from dataclasses import dataclass
 
 from music2video.analysis import Analysis, section_at
-from music2video.registry import BALL_R, EFFECTS, Obstacle, obstacle_penetration
+from music2video.registry import BALL_R, EFFECTS, Obstacle, _solid_rects, obstacle_penetration
 from music2video.scene import xorshift32
 from music2video.themes import THEMES, Theme, pick_theme
 
 SPEED = 680.0
 SPREAD = 0.58
 CLEARANCE = 72.0
+# Visible gutter between two obstacle bodies. The flyer clearance above is
+# only the path; long bars need their own gap or they pile up on screen.
+BODY_GAP = 96.0
+MIN_BODY = 48.0
 # A contact kiss may sink this far into the surface it is hitting. Any other overlap counts.
 SOLID_EPS = 1.5
 
@@ -189,10 +193,15 @@ class MapScene:
         side = 1.0 if xorshift32(self.rng) < 0.5 else -1.0
         heading = lane + side * SPREAD
         # Square spiral: two equal sides, then the run grows, so the return
-        # lane sits outside the path already drawn.
-        row_len = 5
+        # lane sits outside the path already drawn. The sides start long enough
+        # that the parallel lane is off the camera, not piled on the same screen.
+        row_len = 8
         row_left = row_len
         turns = 0
+        step_out = False
+        # How many extra beats this side has already run so the next turn
+        # opens onto empty ground instead of folding back through old bars.
+        held = 0
         pos = (0.0, 0.0)
         t_prev = 0.0
         # Approach the first beat from off-screen time zero when the beat is not at 0.
@@ -214,19 +223,39 @@ class MapScene:
             if extend and phrase != last_phrase:
                 row_left += 2
             last_phrase = phrase
-            ivx, ivy = _unit(math.cos(heading), math.sin(heading))
+            travel = heading
+            # Inside the bars already placed, lean the next step outward.
+            # The nudge is small, so the route still meanders instead of fleeing.
+            if len(self.obstacles) >= 8 and _inside_cloud(pos, self.obstacles, 160.0):
+                travel = _nudge_out(pos, heading, self.obstacles)
+            ivx, ivy = _unit(math.cos(travel), math.sin(travel))
             dt = max(1e-3, beat - t_prev)
             length = speed * dt
             # A fast grid cannot throw a chord across the spiral. A slow gap
             # keeps the longer flight, which is the visible stretch.
             if median_dt < 0.55:
                 length = min(length, 340.0 * math.sqrt(dt / median_dt))
+            # The first step of a new side walks away from the bars just placed.
+            if step_out:
+                length *= 1.55
+                step_out = False
             hit = (pos[0] + ivx * length, pos[1] + ivy * length)
             next_lane = lane
             next_side = -side
             next_spread = spread
             row_left -= 1
-            if row_left <= 0:
+            want_turn = row_left <= 0
+            # A square turn whose next side would run back through the cloud
+            # waits, as long as the current side still has open ground ahead.
+            if want_turn and held < 12 and len(self.obstacles) >= 8:
+                next_dir = lane + math.pi / 2
+                if _room_ahead(pos, heading, self.obstacles) > 700.0 and _room_ahead(pos, next_dir, self.obstacles) < 1100.0:
+                    want_turn = False
+                    row_left = 1
+                    held += 1
+                    step_out = True
+            if want_turn:
+                held = 0
                 next_lane = lane + math.pi / 2
                 turns += 1
                 if turns % 2 == 0:
@@ -234,12 +263,14 @@ class MapScene:
                 row_left = row_len
                 next_spread = 0.22 if phrase == "cluster" else 0.12
                 next_side = side
+                step_out = True
             ovx, ovy = _unit(math.cos(next_lane + next_side * next_spread), math.sin(next_lane + next_side * next_spread))
+            planned_heading = math.atan2(ovy, ovx)
             # Steer around flight lines and around walls already on the map.
             # A yaw turns the arrival and the departure together. If that still
             # meets an old body, a wider or reversed bounce is tried before a
             # shorter chord.
-            hit, ivx, ivy, ovx, ovy = _avoid_overlap(
+            hit, ivx, ivy, ovx, ovy = _steer_clear(
                 pos, hit, (ivx, ivy), (ovx, ovy), polys, length, self.obstacles, self.segments, t_prev, beat
             )
             kind = _choose_kind(self.skin.objects, is_strong, counts, last_kind, self.rng)
@@ -253,6 +284,7 @@ class MapScene:
             scale = min(1.0, length / 280.0)
             size, peg_r, spin, _ignored = _object_dims(kind, is_strong, section.energy, scale, self.rng)
             size = min(420.0, size * _VARIANT_SCALE.get(variant, 1.0) * _SECTION_SIZE.get(section.label, 1.0))
+            size = _cap_size_for_gap(hit, size, self.obstacles)
             if kind == "peg":
                 peg_r = size
             bow = 0.0
@@ -301,7 +333,14 @@ class MapScene:
             t_prev = beat
             lane = next_lane
             side = next_side
-            heading = math.atan2(ovy, ovx)
+            # A dodge that aims back into the cloud must not become the new lane.
+            # The next beat resumes the spiral, and the clearance search can yaw
+            # again if that heading is blocked.
+            actual_heading = math.atan2(ovy, ovx)
+            if _aims_into(hit, actual_heading, self.obstacles) and not _aims_into(hit, planned_heading, self.obstacles):
+                heading = planned_heading
+            else:
+                heading = actual_heading
         if self.duration > t_prev + 1e-3:
             ivx, ivy = _unit(math.cos(heading), math.sin(heading))
             dist = SPEED * (self.duration - t_prev)
@@ -325,6 +364,7 @@ class MapScene:
         # shrinking is only the residue a turn could not get around.
         _align_bounce_normals(self.obstacles, self.segments)
         _seat_obstacles(self)
+        _spread_obstacle_bodies(self)
 
     def position_at(self, time: float) -> tuple[float, float]:
         if not self.segments:
@@ -869,6 +909,211 @@ def _seat_obstacles(scene: MapScene) -> None:
         obs.spin = spin
 
 
+def _body_aabbs(obs: Obstacle) -> list[tuple[float, float, float, float]]:
+    """World-axis boxes around the drawn solid. A disk uses its own radius."""
+    nx, ny = obs.nx, obs.ny
+    tx, ty = -ny, nx
+    if obs.kind == "peg":
+        boxes = []
+        cx = obs.x + nx * (BALL_R + obs.peg_r)
+        cy = obs.y + ny * (BALL_R + obs.peg_r)
+        radius = max(obs.peg_r, 8.0)
+        boxes.append((cx - radius, cy - radius, cx + radius, cy + radius))
+        if obs.variant == "pair":
+            radius2 = radius * 0.78
+            cx2 = cx + tx * obs.peg_r * 2.4
+            cy2 = cy + ty * obs.peg_r * 2.4
+            boxes.append((cx2 - radius2, cy2 - radius2, cx2 + radius2, cy2 + radius2))
+        return boxes
+    if obs.kind == "spinner":
+        reach = abs(obs.size) * 0.5 + 18.0
+        return [(obs.x - reach, obs.y - reach, obs.x + reach, obs.y + reach)]
+    ox = obs.x + nx * BALL_R
+    oy = obs.y + ny * BALL_R
+    boxes = []
+    for x, y, w, h in _solid_rects(obs):
+        xs = []
+        ys = []
+        for lx, ly in ((x, y), (x + w, y), (x + w, y + h), (x, y + h)):
+            xs.append(ox + nx * lx + tx * ly)
+            ys.append(oy + ny * lx + ty * ly)
+        boxes.append((min(xs), min(ys), max(xs), max(ys)))
+    return boxes or [(obs.x - 8.0, obs.y - 8.0, obs.x + 8.0, obs.y + 8.0)]
+
+
+def _aabb_sep(a, b) -> float:
+    """Positive when the boxes are apart, negative when they overlap."""
+    if a[2] < b[0]:
+        dx = b[0] - a[2]
+    elif b[2] < a[0]:
+        dx = a[0] - b[2]
+    else:
+        dx = -min(a[2] - b[0], b[2] - a[0])
+    if a[3] < b[1]:
+        dy = b[1] - a[3]
+    elif b[3] < a[1]:
+        dy = a[1] - b[3]
+    else:
+        dy = -min(a[3] - b[1], b[3] - a[1])
+    if dx >= 0.0 and dy >= 0.0:
+        return math.hypot(dx, dy)
+    if dx >= 0.0:
+        return dx
+    if dy >= 0.0:
+        return dy
+    return max(dx, dy)
+
+
+def _pair_sep(left: Obstacle, right: Obstacle) -> float:
+    return min(_aabb_sep(a, b) for a in _body_aabbs(left) for b in _body_aabbs(right))
+
+
+def _cap_size_for_gap(hit, size: float, obstacles) -> float:
+    """Keep the new bar from reaching the nearest body already on the map."""
+    if not obstacles:
+        return size
+    nearest = min(obstacles, key=lambda obs: math.hypot(hit[0] - obs.x, hit[1] - obs.y))
+    dist = math.hypot(hit[0] - nearest.x, hit[1] - nearest.y)
+    room = dist - nearest.size * 0.5 - BODY_GAP
+    return min(size, max(MIN_BODY, room * 2.0))
+
+
+def _shrink_body(obs: Obstacle, size: float) -> None:
+    size = max(MIN_BODY * 0.5, size)
+    if obs.kind == "peg" and obs.size > 1.0:
+        obs.peg_r = max(10.0, obs.peg_r * size / obs.size)
+    obs.size = size
+
+
+def _try_reduce(obs: Obstacle, samples, half: float) -> bool:
+    """Shrink without sliding a new piece onto the flyer path."""
+    before = (obs.variant, obs.size, obs.peg_r)
+    pen_before = _pen_on(obs, samples, half)
+    if obs.variant in _SIMPLER and obs.variant not in {"long", "short", "single", "block", "crack"}:
+        obs.variant = _SIMPLER[obs.variant][0]
+        if _pen_on(obs, samples, half) <= pen_before + 1e-4:
+            return True
+        obs.variant, obs.size, obs.peg_r = before
+    if obs.size <= MIN_BODY + 0.5:
+        return False
+    _shrink_body(obs, max(MIN_BODY, obs.size * 0.82))
+    if _pen_on(obs, samples, half) <= pen_before + 1e-4:
+        return True
+    obs.variant, obs.size, obs.peg_r = before
+    return False
+
+
+def _spread_obstacle_bodies(scene: MapScene) -> None:
+    """Shorten the newer body until the two solids have a visible gutter.
+
+    Positions stay on the beat. A shrink that would move solid onto the flyer
+    is rejected, so the contact kiss is unchanged.
+    """
+    if len(scene.obstacles) < 2 or not scene.segments:
+        return
+    samples = list(_flight_samples(scene, 30.0))
+    half = 0.5 / 30.0
+    obstacles = scene.obstacles
+    for index, newer in enumerate(obstacles):
+        for older in obstacles[:index]:
+            for _ in range(8):
+                if _pair_sep(older, newer) >= BODY_GAP:
+                    break
+                if _try_reduce(newer, samples, half):
+                    continue
+                if _try_reduce(older, samples, half):
+                    continue
+                break
+
+
+def _cloud_center(obstacles) -> tuple[float, float]:
+    count = float(len(obstacles))
+    return sum(obs.x for obs in obstacles) / count, sum(obs.y for obs in obstacles) / count
+
+
+def _inside_cloud(pos, obstacles, margin: float = 120.0) -> bool:
+    if len(obstacles) < 6:
+        return False
+    min_x = min(obs.x for obs in obstacles) - margin
+    max_x = max(obs.x for obs in obstacles) + margin
+    min_y = min(obs.y for obs in obstacles) - margin
+    max_y = max(obs.y for obs in obstacles) + margin
+    return min_x <= pos[0] <= max_x and min_y <= pos[1] <= max_y
+
+
+def _room_ahead(pos, angle: float, obstacles) -> float:
+    """How far the corridor ahead stays clear of bodies already placed."""
+    dx, dy = math.cos(angle), math.sin(angle)
+    room = 4200.0
+    for obs in obstacles:
+        vx, vy = obs.x - pos[0], obs.y - pos[1]
+        along = vx * dx + vy * dy
+        if along < 60.0:
+            continue
+        lateral = abs(vx * dy - vy * dx)
+        half = obs.size * 0.5 + 220.0
+        if lateral < half:
+            room = min(room, along - half)
+    return room
+
+
+def _nudge_out(pos, heading: float, obstacles) -> float:
+    """Turn a heading partway away from the obstacle cloud, at most ~37 degrees."""
+    cx, cy = _cloud_center(obstacles)
+    away = math.atan2(pos[1] - cy, pos[0] - cx)
+    delta = math.atan2(math.sin(away - heading), math.cos(away - heading))
+    delta = max(-0.65, min(0.65, delta * 0.5))
+    return heading + delta
+
+
+def _aims_into(origin, angle: float, obstacles) -> bool:
+    """True when a departure inside the cloud points back toward its center."""
+    if len(obstacles) < 6 or not _inside_cloud(origin, obstacles, 80.0):
+        return False
+    cx, cy = _cloud_center(obstacles)
+    vx, vy = cx - origin[0], cy - origin[1]
+    dist = math.hypot(vx, vy)
+    if dist < 1.0:
+        return True
+    return (math.cos(angle) * vx + math.sin(angle) * vy) / dist > 0.3
+
+
+def _steer_clear(pos, hit, incoming, outgoing, polys, length, obstacles, segments, t0, t1):
+    """Use the safe chord, unless it lands on top of an older bar.
+
+    A modest yaw is tried only then, and only a chord the same search already
+    accepts. The path still meanders; it just steps off a bar it was about to crowd.
+    """
+    routed = _avoid_overlap(pos, hit, incoming, outgoing, polys, length, obstacles, segments, t0, t1)
+    if len(obstacles) < 3:
+        return routed
+
+    def clearance(point) -> float:
+        return min(math.hypot(point[0] - obs.x, point[1] - obs.y) - obs.size * 0.5 for obs in obstacles)
+
+    gap = clearance(routed[0])
+    if gap >= MIN_BODY * 0.5 + BODY_GAP:
+        return routed
+    best = routed
+    best_gap = gap
+    ix, iy = incoming
+    ox, oy = outgoing
+    for degrees in (28, -28, 48, -48, 72, -72, 96, -96):
+        rad = math.radians(degrees)
+        cosine, sine = math.cos(rad), math.sin(rad)
+        nix, niy = ix * cosine - iy * sine, ix * sine + iy * cosine
+        nox, noy = ox * cosine - oy * sine, ox * sine + oy * cosine
+        trial_hit = (pos[0] + nix * length, pos[1] + niy * length)
+        trial = _avoid_overlap(pos, trial_hit, (nix, niy), (nox, noy), polys, length, obstacles, segments, t0, t1)
+        trial_gap = clearance(trial[0])
+        if trial_gap > best_gap + 28.0:
+            best = trial
+            best_gap = trial_gap
+            if trial_gap >= MIN_BODY * 0.5 + BODY_GAP + 24.0:
+                break
+    return best
+
+
 def _avoid_overlap(pos, hit, incoming, outgoing, polys, length, obstacles=None, segments=None, t0=0.0, t1=1.0, allow_bend=True):
     """Find a chord that misses flight lines and obstacle bodies.
 
@@ -1054,7 +1299,7 @@ def _phrase_motion(label: str, index: int, strong: bool) -> tuple[str, float, fl
     on the chord so the tangent never reverses.
     """
     if label == "intense" and index % 10 != 0:
-        return "cluster", 480.0, 0.8 if strong else 0.64, 0.0, False
+        return "cluster", 560.0, 0.48 if strong else 0.4, 0.0, False
     if label == "calm":
         if (index // 4) % 2 == 0:
             return "stretch", 860.0, 0.22, 0.0, True
