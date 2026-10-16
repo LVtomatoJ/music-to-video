@@ -16,7 +16,7 @@ import math  # noqa: E402
 
 from music2video.analysis import Analysis, Section, analyze  # noqa: E402
 from music2video.cli import main  # noqa: E402
-from music2video.mapscene import MapScene, _reflect, _segment_tangent  # noqa: E402
+from music2video.mapscene import MapScene, _reflect, _segment_tangent, max_flyer_penetration  # noqa: E402
 from music2video.themes import THEMES, pick_theme  # noqa: E402
 from tools.make_test_track import synthesize, write_wav  # noqa: E402
 from tools.score_beats import match_counts  # noqa: E402
@@ -162,6 +162,16 @@ class PipelineTest(unittest.TestCase):
         hot = [obs.size for obs in neon.obstacles if obs.section == "intense"]
         if calm and hot:
             self.assertGreater(sum(hot) / len(hot), sum(calm) / len(calm))
+
+    def test_flyer_does_not_cross_placed_obstacles(self) -> None:
+        analysis = analyze(self.wav, Path(self.tmp.name))
+        for name in ("neon", "pastel", "arcade", "piano", "shatter"):
+            for seed in (7, 42):
+                scene = MapScene.create(1920, 1080, analysis, seed=seed, theme=name)
+                pen = max_flyer_penetration(scene)
+                self.assertLessEqual(pen, 0.0, (name, seed, round(pen, 2)))
+                self.assertEqual(scene.timing["max_timing_error_s"], 0.0, name)
+                self.assertGreaterEqual(scene.timing["min_clearance_px"], 72.0, (name, seed))
 
     def test_themes_keep_their_own_objects_and_feel(self) -> None:
         analysis = analyze(self.wav, Path(self.tmp.name))

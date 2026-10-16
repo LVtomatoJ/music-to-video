@@ -72,6 +72,206 @@ def contact(obs: Obstacle) -> tuple[float, float]:
     return obs.x + obs.nx * BALL_R, obs.y + obs.ny * BALL_R
 
 
+def arch_offset(length: float, thick: float) -> float:
+    """Shift so the stroked arch's near side sits on the contact plane."""
+    rad = thick / 2.0
+    min_x = min(_arch_point(length, step / 32.0)[0] for step in range(33))
+    return rad - min_x
+
+
+def _arch_point(length: float, u: float) -> tuple[float, float]:
+    p0 = (length * 0.18, -length / 2.0)
+    c0 = (-length * 0.06, -length * 0.18)
+    c1 = (-length * 0.06, length * 0.18)
+    p1 = (length * 0.18, length / 2.0)
+    omu = 1.0 - u
+    x = omu**3 * p0[0] + 3 * omu**2 * u * c0[0] + 3 * omu * u**2 * c1[0] + u**3 * p1[0]
+    y = omu**3 * p0[1] + 3 * omu**2 * u * c0[1] + 3 * omu * u**2 * c1[1] + u**3 * p1[1]
+    return x, y
+
+
+def _rect_penetration(lx: float, ly: float, x: float, y: float, w: float, h: float, radius: float) -> float:
+    """How far a disk at (lx, ly) enters an axis-aligned rectangle."""
+    if w < 0.0:
+        x, w = x + w, -w
+    if h < 0.0:
+        y, h = y + h, -h
+    nearest_x = min(max(lx, x), x + w)
+    nearest_y = min(max(ly, y), y + h)
+    if lx < x or lx > x + w or ly < y or ly > y + h:
+        return radius - math.hypot(lx - nearest_x, ly - nearest_y)
+    inset = min(lx - x, x + w - lx, ly - y, y + h - ly)
+    return radius + inset
+
+
+def _circle_penetration(px: float, py: float, cx: float, cy: float, cr: float, radius: float) -> float:
+    return radius + cr - math.hypot(px - cx, py - cy)
+
+
+def _capsule_penetration(
+    lx: float, ly: float, x0: float, y0: float, x1: float, y1: float, cr: float, radius: float
+) -> float:
+    dx, dy = x1 - x0, y1 - y0
+    length_sq = dx * dx + dy * dy
+    if length_sq < 1e-8:
+        return _circle_penetration(lx, ly, x0, y0, cr, radius)
+    t = min(1.0, max(0.0, ((lx - x0) * dx + (ly - y0) * dy) / length_sq))
+    return _circle_penetration(lx, ly, x0 + dx * t, y0 + dy * t, cr, radius)
+
+
+def _solid_reach(obs: Obstacle) -> float:
+    """Overestimate of the distance from the ball center to any solid point."""
+    span = max(abs(obs.size), abs(obs.peg_r), 1.0)
+    if obs.kind == "piano":
+        return span * 8.0 + 80.0
+    if obs.kind == "peg":
+        return BALL_R + span * 3.5 + 8.0
+    if obs.kind == "spinner":
+        return span * 2.0 + 48.0
+    return span * 0.9 + 80.0
+
+
+def obstacle_penetration(
+    obs: Obstacle,
+    px: float,
+    py: float,
+    radius: float,
+    time: float,
+    normal: tuple[float, float] | None = None,
+) -> float:
+    """Signed overlap of a disk with the obstacle's drawn solid.
+
+    Positive means the disk enters the body. The contact kiss of a face that
+    starts on the contact plane is zero when the center sits one radius outside.
+    A broken block keeps its unbroken shape: the flyer still cannot fly the hole.
+    """
+    nx, ny = obs.nx, obs.ny
+    if normal is not None:
+        nx, ny = normal
+    tx, ty = -ny, nx
+    if math.hypot(px - obs.x, py - obs.y) > _solid_reach(obs) + radius:
+        return -1.0
+    if obs.kind == "peg":
+        return _peg_penetration(obs, px, py, nx, ny, tx, ty, radius)
+    if obs.kind == "spinner":
+        return _spinner_penetration(obs, px, py, nx, ny, tx, ty, radius, time)
+    ox = obs.x + nx * BALL_R
+    oy = obs.y + ny * BALL_R
+    dx, dy = px - ox, py - oy
+    lx = dx * nx + dy * ny
+    ly = dx * tx + dy * ty
+    if obs.kind == "pad":
+        thick = 28.0 + (10.0 if obs.strong else 0.0)
+        half = obs.size / 2.0
+        return _capsule_penetration(lx, ly, thick * 0.5, -half, thick * 0.5, half, thick / 2.0, radius)
+    if obs.kind == "platform" and obs.variant == "arch":
+        return _arch_penetration(obs.size, 16.0 if obs.variant == "short" else 22.0, lx, ly, radius)
+    worst = -1e9
+    for x, y, w, h in _solid_rects(obs):
+        worst = max(worst, _rect_penetration(lx, ly, x, y, w, h, radius))
+    return worst
+
+
+def _solid_rects(obs: Obstacle) -> list[tuple[float, float, float, float]]:
+    length = obs.size
+    variant = obs.variant
+    if obs.kind == "wall":
+        thick = 14.0 if variant == "short" else 18.0
+        rects = [(0.0, -length / 2.0, thick, length)]
+        if variant == "double":
+            rects.append((thick + 16.0, -length * 0.42, thick * 0.75, length * 0.84))
+        if variant == "corner":
+            arm = max(54.0, length * 0.42)
+            rects.append((0.0, length / 2.0 - thick, arm, thick))
+        return rects
+    if obs.kind == "platform":
+        thick = 16.0 if variant == "short" else 22.0
+        rects = [(0.0, -length / 2.0, thick, length)]
+        for foot in (-length * 0.32, length * 0.32):
+            rects.append((thick * 0.35, foot - 5.0, thick * 1.3, 10.0))
+        return rects
+    if obs.kind == "breakable":
+        side = length
+        if variant == "crack":
+            return [(0.0, -side, 12.0, side * 2.0)]
+        if variant == "stack":
+            block_h = side * 0.42
+            return [
+                (0.0, slot * (block_h + 8.0) - block_h / 2.0, side * 0.9, block_h) for slot in (-1, 0, 1)
+            ]
+        return [(0.0, -side / 2.0, side, side)]
+    if obs.kind == "piano":
+        if variant == "single":
+            indices = (0,)
+        elif variant == "chord":
+            indices = (-1, 0, 1)
+        else:
+            indices = tuple(range(-3, 4))
+        key_w = max(18.0, length if variant != "single" else length * 1.35)
+        key_h = key_w * (3.1 if variant == "single" else 2.6)
+        rects = []
+        for index in indices:
+            local_y = index * (key_w + 3.0)
+            black = variant == "pattern" and index % 2 != 0
+            height = key_h * (0.62 if black else 1.0)
+            rects.append((0.0, local_y - key_w / 2.0, height, key_w))
+        return rects
+    return []
+
+
+def _arch_penetration(length: float, thick: float, lx: float, ly: float, radius: float) -> float:
+    shift = arch_offset(length, thick)
+    rad = thick / 2.0
+    steps = max(16, int(length / 4.0))
+    worst = -1e9
+    for step in range(steps + 1):
+        x, y = _arch_point(length, step / steps)
+        worst = max(worst, _circle_penetration(lx, ly, x + shift, y, rad, radius))
+    return worst
+
+
+def _peg_penetration(
+    obs: Obstacle, px: float, py: float, nx: float, ny: float, tx: float, ty: float, radius: float
+) -> float:
+    cx = obs.x + nx * (BALL_R + obs.peg_r)
+    cy = obs.y + ny * (BALL_R + obs.peg_r)
+    worst = _circle_penetration(px, py, cx, cy, obs.peg_r, radius)
+    if obs.variant == "pair":
+        offset = obs.peg_r * 2.4
+        worst = max(
+            worst,
+            _circle_penetration(px, py, cx + tx * offset, cy + ty * offset, obs.peg_r * 0.78, radius),
+        )
+    return worst
+
+
+def _spinner_penetration(
+    obs: Obstacle,
+    px: float,
+    py: float,
+    nx: float,
+    ny: float,
+    tx: float,
+    ty: float,
+    radius: float,
+    time: float,
+) -> float:
+    length = obs.size * (0.7 if obs.variant == "short" else 1.35 if obs.variant == "long" else 1.0)
+    thick = 22.0 if obs.variant == "short" else 14.0
+    angle = math.atan2(ty, tx) + obs.spin * (time - obs.hit_time)
+    cosine, sine = math.cos(angle), math.sin(angle)
+    ox = obs.x + nx * BALL_R
+    oy = obs.y + ny * BALL_R
+    dx, dy = px - ox, py - oy
+    lx = dx * cosine + dy * sine
+    ly = dx * (-sine) + dy * cosine
+    worst = _rect_penetration(lx, ly, -length / 2.0, -thick, length, thick, radius)
+    cap = thick / 2.0
+    worst = max(worst, _circle_penetration(lx, ly, -length / 2.0, -thick / 2.0, cap, radius))
+    worst = max(worst, _circle_penetration(lx, ly, length / 2.0, -thick / 2.0, cap, radius))
+    return worst
+
+
 def _place(ctx, obs: Obstacle) -> None:
     cx, cy = contact(obs)
     ctx.translate(cx, cy)
@@ -135,10 +335,11 @@ def draw_platform(ctx, obs: Obstacle, time: float, alpha: float, hue: float) -> 
     ctx.set_source_rgba(red, green, blue, alpha)
     if obs.variant == "arch":
         # Crown sits on the contact point. The body bows back into the platform.
+        shift = arch_offset(length, thick)
         ctx.set_line_width(thick)
         ctx.set_line_cap(1)
-        ctx.move_to(length * 0.18, -length / 2)
-        ctx.curve_to(-length * 0.06, -length * 0.18, -length * 0.06, length * 0.18, length * 0.18, length / 2)
+        ctx.move_to(length * 0.18 + shift, -length / 2)
+        ctx.curve_to(-length * 0.06 + shift, -length * 0.18, -length * 0.06 + shift, length * 0.18, length * 0.18 + shift, length / 2)
         ctx.stroke()
     else:
         ctx.rectangle(0, -length / 2, thick, length)
@@ -190,8 +391,9 @@ def draw_pad(ctx, obs: Obstacle, time: float, alpha: float, hue: float) -> None:
     ctx.set_source_rgba(red, green, blue, alpha)
     ctx.set_line_width(thick)
     ctx.set_line_cap(1)
-    ctx.move_to(thick * 0.45, -length / 2)
-    ctx.line_to(thick * 0.45, length / 2)
+    # The stroke is centered on the path. Half the thickness lands on the contact plane.
+    ctx.move_to(thick * 0.5, -length / 2)
+    ctx.line_to(thick * 0.5, length / 2)
     ctx.stroke()
     ctx.set_source_rgba(1, 1, 1, alpha * 0.7)
     ctx.set_line_width(4)

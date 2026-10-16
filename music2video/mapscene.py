@@ -6,13 +6,15 @@ import math
 from dataclasses import dataclass
 
 from music2video.analysis import Analysis, section_at
-from music2video.registry import BALL_R, EFFECTS, Obstacle
+from music2video.registry import BALL_R, EFFECTS, Obstacle, obstacle_penetration
 from music2video.scene import xorshift32
 from music2video.themes import THEMES, Theme, pick_theme
 
 SPEED = 680.0
 SPREAD = 0.58
 CLEARANCE = 72.0
+# A contact kiss may sink this far into the surface it is hitting. Any other overlap counts.
+SOLID_EPS = 1.5
 
 
 @dataclass
@@ -230,12 +232,13 @@ class MapScene:
                 next_spread = 0.22 if phrase == "cluster" else 0.12
                 next_side = side
             ovx, ovy = _unit(math.cos(next_lane + next_side * next_spread), math.sin(next_lane + next_side * next_spread))
-            # Steer around a clash by rotating the whole bounce. The departure
-            # stays the reflection of the arrival, so the next segment cannot
-            # leave at an unrelated angle.
-            hit, ivx, ivy, ovx, ovy = _avoid_overlap(pos, hit, (ivx, ivy), (ovx, ovy), polys, length)
-            nx, ny = _unit(ivx - ovx, ivy - ovy)
-            tx, ty = -ny, nx
+            # Steer around flight lines and around walls already on the map.
+            # A yaw turns the arrival and the departure together. If that still
+            # meets an old body, a wider or reversed bounce is tried before a
+            # shorter chord.
+            hit, ivx, ivy, ovx, ovy = _avoid_overlap(
+                pos, hit, (ivx, ivy), (ovx, ovy), polys, length, self.obstacles, self.segments, t_prev, beat
+            )
             kind = _choose_kind(self.skin.objects, is_strong, counts, last_kind, self.rng)
             counts[kind] += 1
             last_kind = kind
@@ -251,7 +254,19 @@ class MapScene:
                 peg_r = size
             bow = 0.0
             if phrase == "curve":
-                bow = _fit_bow(pos, hit, min(18.0, bow_frac * length), polys)
+                bow = _fit_bow(
+                    pos, hit, min(18.0, bow_frac * length), polys, self.obstacles, self.segments, t_prev, beat
+                )
+            # The departure just chosen is the final normal of the surface we left.
+            if self.obstacles and self.segments:
+                _write_normal(
+                    self.obstacles[-1],
+                    _segment_tangent(self.segments[-1], True),
+                    _tangent_of(pos, hit, bow, False),
+                )
+            end_tx, end_ty = _tangent_of(pos, hit, bow, True)
+            nx, ny = _normal_from(end_tx, end_ty, ovx, ovy) or _unit(ivx - ovx, ivy - ovy)
+            tx, ty = -ny, nx
             kind_hue = self.skin.hue_step * self.skin.objects.index(kind)
             light = self.skin.object_light * _SECTION_LIGHT.get(section.label, 1.0)
             self.obstacles.append(
@@ -287,13 +302,26 @@ class MapScene:
         if self.duration > t_prev + 1e-3:
             ivx, ivy = _unit(math.cos(heading), math.sin(heading))
             dist = SPEED * (self.duration - t_prev)
-            self.segments.append(
-                Segment(t_prev, self.duration, pos[0], pos[1], pos[0] + ivx * dist, pos[1] + ivy * dist)
+            end = (pos[0] + ivx * dist, pos[1] + ivy * dist)
+            end, ivx, ivy, _ox, _oy = _avoid_overlap(
+                pos,
+                end,
+                (ivx, ivy),
+                (ivx, ivy),
+                polys,
+                dist,
+                self.obstacles,
+                self.segments,
+                t_prev,
+                self.duration,
+                allow_bend=False,
             )
-        # The next corner may still yaw the departure. Rebuild every normal
-        # from the two segments that actually meet, which is the direction
-        # that reflects the arrival into that departure.
+            self.segments.append(Segment(t_prev, self.duration, pos[0], pos[1], end[0], end[1]))
+        # Rebuild every normal from the two segments that actually meet, then
+        # shorten any body that still crosses the flown path. Routing runs first;
+        # shrinking is only the residue a turn could not get around.
         _align_bounce_normals(self.obstacles, self.segments)
+        _seat_obstacles(self)
 
     def position_at(self, time: float) -> tuple[float, float]:
         if not self.segments:
@@ -514,6 +542,46 @@ class MapScene:
         return math.sin(self.time * 18.0) * self.shake, math.cos(self.time * 15.0) * self.shake * 0.55
 
 
+def max_flyer_penetration(scene: MapScene, fps: float = 30.0) -> float:
+    """Largest flyer-disk overlap with any obstacle that is not the current contact.
+
+    Samples are every video frame, the exact beat times, and a point every few
+    pixels along the path. Within half a frame of an obstacle's own beat, the
+    first SOLID_EPS pixels are the contact kiss and do not count.
+    """
+    worst = 0.0
+    half = 0.5 / fps
+    for px, py, time in _flight_samples(scene, fps):
+        for obs in scene.obstacles:
+            pen = obstacle_penetration(obs, px, py, BALL_R, time)
+            if pen <= 0.0:
+                continue
+            if abs(time - obs.hit_time) <= half + 1e-4:
+                pen -= SOLID_EPS
+            if pen > worst:
+                worst = pen
+    return worst
+
+
+def _flight_samples(scene: MapScene, fps: float):
+    nframes = int(math.floor(scene.duration * fps + 1e-6))
+    for frame in range(max(nframes, 1)):
+        time = frame / fps
+        x, y = scene.position_at(time)
+        yield x, y, time
+    for obs in scene.obstacles:
+        x, y = scene.position_at(obs.hit_time)
+        yield x, y, obs.hit_time
+    for seg in scene.segments:
+        length = math.hypot(seg.x1 - seg.x0, seg.y1 - seg.y0)
+        steps = max(1, int(math.ceil(length / 8.0)))
+        span = seg.t1 - seg.t0
+        for step in range(steps + 1):
+            u = step / steps
+            x, y = _point_on(seg, u)
+            yield x, y, seg.t0 + span * u
+
+
 def _gap(scene: MapScene, obs: Obstacle, time: float) -> float:
     px, py = scene.position_at(time)
     if obs.kind == "peg":
@@ -561,37 +629,338 @@ def _reflect(ix: float, iy: float, nx: float, ny: float) -> tuple[float, float]:
     return _unit(ix - 2.0 * dot * nx, iy - 2.0 * dot * ny)
 
 
-def _avoid_overlap(pos, hit, incoming, outgoing, polys, length):
-    """Yaw the whole corner until this arrival is clear.
+def _tangent_of(a, b, bow: float, at_end: bool) -> tuple[float, float]:
+    return _segment_tangent(Segment(0.0, 1.0, a[0], a[1], b[0], b[1], bow), at_end)
 
-    Incoming and outgoing rotate together, so the bounce angle is unchanged.
-    A fast song can grow a long hall that would cut the spiral; a shorter
-    chord at the same bounce is tried before giving up.
+
+def _normal_from(ix: float, iy: float, ox: float, oy: float):
+    dx, dy = ix - ox, iy - oy
+    if math.hypot(dx, dy) < 1e-4:
+        return None
+    return _unit(dx, dy)
+
+
+def _write_normal(obs: Obstacle, arrival: tuple[float, float], departure: tuple[float, float]) -> None:
+    normal = _normal_from(arrival[0], arrival[1], departure[0], departure[1])
+    if normal is None:
+        return
+    obs.nx, obs.ny = normal
+    obs.tx, obs.ty = -normal[1], normal[0]
+
+
+def _iter_points(a, b, bow: float, t0: float, t1: float, step: float = 8.0):
+    length = math.hypot(b[0] - a[0], b[1] - a[1])
+    steps = max(1, int(math.ceil(length / step)))
+    span = t1 - t0
+    for index in range(steps + 1):
+        u = index / steps
+        x, y = _bulge_point(a, b, bow, u)
+        yield x, y, t0 + span * u
+
+
+def _flown_points(segments: list[Segment]) -> list[tuple[float, float, float]]:
+    points: list[tuple[float, float, float]] = []
+    for seg in segments:
+        points.extend(_iter_points((seg.x0, seg.y0), (seg.x1, seg.y1), seg.bow, seg.t0, seg.t1))
+    return points
+
+
+def _count_pen(obs: Obstacle, px: float, py: float, time: float, normal, half: float) -> float:
+    pen = obstacle_penetration(obs, px, py, BALL_R, time, normal)
+    if pen <= 0.0:
+        return 0.0
+    if abs(time - obs.hit_time) <= half + 1e-4:
+        pen -= SOLID_EPS
+    return pen if pen > 0.0 else 0.0
+
+
+def _leg_solid_pen(a, b, bow, t0, t1, obstacles, segments, flown) -> float:
+    """Overlap of this chord, and of the path already flown, with solid obstacles.
+
+    The surface just left turns with this departure. A yaw that swings that
+    body into the path already drawn is rejected along with a chord that
+    enters any earlier body.
     """
+    if not obstacles:
+        return 0.0
+    half = 0.5 / 30.0
+    overrides = {}
+    if segments:
+        normal = _normal_from(*_segment_tangent(segments[-1], True), *_tangent_of(a, b, bow, False))
+        if normal is None:
+            return 1e6
+        overrides[len(obstacles) - 1] = normal
+    worst = 0.0
+    for px, py, time in _iter_points(a, b, bow, t0, t1):
+        for index, obs in enumerate(obstacles):
+            pen = _count_pen(obs, px, py, time, overrides.get(index), half)
+            if pen > worst:
+                worst = pen
+    if flown and overrides:
+        obs = obstacles[-1]
+        normal = overrides[len(obstacles) - 1]
+        for px, py, time in flown:
+            pen = _count_pen(obs, px, py, time, normal, half)
+            if pen > worst:
+                worst = pen
+    return worst
+
+
+_SIMPLER = {
+    "double": ("long", "short"),
+    "corner": ("long", "short"),
+    "long": ("short",),
+    "arch": ("long", "short"),
+    "stack": ("block", "crack"),
+    "block": ("crack",),
+    "pattern": ("chord", "single"),
+    "chord": ("single",),
+    "pair": ("single",),
+}
+
+
+def _relax_obstacle(obs: Obstacle, pen_fn) -> bool:
+    """Shrink this body until pen_fn is clear. Keeps the variant when a shorter one fits."""
+    if pen_fn() <= 1e-6:
+        return False
+    original_variant = obs.variant
+    original_size = max(obs.size, 1.0)
+    original_peg = obs.peg_r
+    original_spin = obs.spin
+    variants = [original_variant]
+    for name in _SIMPLER.get(original_variant, ()):
+        if name not in variants:
+            variants.append(name)
+    sizes = []
+    size = original_size
+    while size > 18.0:
+        size = max(18.0, size * 0.72)
+        sizes.append(size)
+    changed = False
+    for variant in variants:
+        try_sizes = list(sizes)
+        if variant != original_variant:
+            try_sizes = [original_size, *sizes]
+        for next_size in try_sizes:
+            obs.variant = variant
+            obs.size = next_size
+            if obs.kind == "peg":
+                obs.peg_r = max(10.0, original_peg * next_size / original_size)
+            changed = True
+            if pen_fn() <= 1e-6:
+                return True
+    if obs.kind == "spinner":
+        for factor in (0.45, 0.2, 0.0):
+            obs.variant = "short"
+            obs.size = 18.0
+            obs.spin = original_spin * factor
+            changed = True
+            if pen_fn() <= 1e-6:
+                return True
+    return changed
+
+
+def _shrink_blockers(pos, candidate, t0, t1, obstacles, segments, flown) -> bool:
+    """Shorten bodies this chord still enters, so a later pass can route around them."""
+    if not obstacles:
+        return False
+    half = 0.5 / 30.0
+    points = list(_iter_points(pos, candidate, 0.0, t0, t1))
+    normal = None
+    if segments:
+        normal = _normal_from(*_segment_tangent(segments[-1], True), *_tangent_of(pos, candidate, 0.0, False))
+    last = len(obstacles) - 1
+    changed = False
+    for index, obs in enumerate(obstacles):
+        use = normal if index == last else None
+
+        def pen_fn(obs=obs, use=use) -> float:
+            worst = 0.0
+            for px, py, time in points:
+                worst = max(worst, _count_pen(obs, px, py, time, use, half))
+            if use is not None:
+                for px, py, time in flown:
+                    worst = max(worst, _count_pen(obs, px, py, time, use, half))
+            return worst
+
+        if _relax_obstacle(obs, pen_fn):
+            changed = True
+    return changed
+
+
+def _pen_on(obs: Obstacle, samples, half: float) -> float:
+    worst = 0.0
+    for px, py, time in samples:
+        pen = _count_pen(obs, px, py, time, None, half)
+        if pen > worst:
+            worst = pen
+    return worst
+
+
+def _seat_obstacles(scene: MapScene) -> None:
+    """Shrink a body that the routed path still enters. The path stays put."""
+    if not scene.obstacles or not scene.segments:
+        return
+    samples = list(_flight_samples(scene, 30.0))
+    half = 0.5 / 30.0
+    for obs in scene.obstacles:
+        if _pen_on(obs, samples, half) <= 1e-6:
+            continue
+        original_variant = obs.variant
+        original_size = obs.size
+        original_peg = obs.peg_r
+        original_spin = obs.spin
+        variants = [original_variant]
+        for name in _SIMPLER.get(original_variant, ()):
+            if name not in variants:
+                variants.append(name)
+        sizes = [original_size]
+        size = original_size
+        while size > 18.0:
+            size = max(18.0, size * 0.72)
+            sizes.append(size)
+        best = (_pen_on(obs, samples, half), original_variant, original_size, original_peg, original_spin)
+        cleared = False
+        for variant in variants:
+            for size in sizes:
+                if variant == original_variant and abs(size - original_size) < 1e-6:
+                    continue
+                obs.variant = variant
+                obs.size = size
+                if obs.kind == "peg":
+                    obs.peg_r = max(10.0, original_peg * (size / max(original_size, 1.0)))
+                pen = _pen_on(obs, samples, half)
+                if pen <= 1e-6:
+                    cleared = True
+                    break
+                if best is None or pen < best[0]:
+                    best = (pen, variant, size, obs.peg_r, obs.spin)
+            if cleared:
+                break
+        if cleared:
+            continue
+        if obs.kind == "spinner":
+            for factor in (0.45, 0.2, 0.0):
+                obs.variant = "short"
+                obs.size = 18.0
+                obs.spin = original_spin * factor
+                if _pen_on(obs, samples, half) <= 1e-6:
+                    cleared = True
+                    break
+        if cleared:
+            continue
+        if best is None:
+            continue
+        _pen, variant, size, peg_r, spin = best
+        obs.variant = variant
+        obs.size = size
+        obs.peg_r = peg_r
+        obs.spin = spin
+
+
+def _avoid_overlap(pos, hit, incoming, outgoing, polys, length, obstacles=None, segments=None, t0=0.0, t1=1.0, allow_bend=True):
+    """Find a chord that misses flight lines and obstacle bodies.
+
+    The pair of directions yaws together, so a clear corridor keeps its bounce.
+    If every yaw still meets a wall, the departure is opened or reversed, and
+    then the chord is shortened. The least overlap is kept only when nothing
+    is clear.
+    """
+    obstacles = list(obstacles or [])
+    segments = list(segments or [])
     ix, iy = incoming
     ox, oy = outgoing
-    if not _blocked(pos, hit, polys):
-        return hit, ix, iy, ox, oy
+    flown = _flown_points(segments)
     angles = [0]
     for degrees in (12, 22, 34, 48, 66, 84, 110, 140, 168):
         angles.extend((degrees, -degrees))
-    for chord in (length, length * 0.78, length * 0.58):
-        for degrees in angles:
-            rad = math.radians(degrees)
+
+    def search(origin_in, origin_out, chords, yaw_angles):
+        best = None
+        for chord in chords:
+            if chord < 24.0:
+                continue
+            for degrees in yaw_angles:
+                rad = math.radians(degrees)
+                cosine, sine = math.cos(rad), math.sin(rad)
+                ux = origin_in[0] * cosine - origin_in[1] * sine
+                uy = origin_in[0] * sine + origin_in[1] * cosine
+                vx = origin_out[0] * cosine - origin_out[1] * sine
+                vy = origin_out[0] * sine + origin_out[1] * cosine
+                candidate = (pos[0] + ux * chord, pos[1] + uy * chord)
+                if _blocked(pos, candidate, polys):
+                    continue
+                pen = _leg_solid_pen(pos, candidate, 0.0, t0, t1, obstacles, segments, flown)
+                if pen <= 1e-6:
+                    return (candidate, ux, uy, vx, vy), None
+                if best is None or pen < best[0]:
+                    best = (pen, candidate, ux, uy, vx, vy)
+        return None, best
+
+    def probe():
+        found, best = search((ix, iy), (ox, oy), (length, length * 0.78, length * 0.58, length * 0.4, length * 0.28), angles)
+        if found is not None:
+            return found, best
+        # The planned bounce cannot pass. Open the turn, then try the mirror.
+        for extra in (32, -32, 58, -58, 90, -90, 130, -130, 175, -175):
+            rad = math.radians(extra)
             cosine, sine = math.cos(rad), math.sin(rad)
-            ux, uy = ix * cosine - iy * sine, ix * sine + iy * cosine
-            vx, vy = ox * cosine - oy * sine, ox * sine + oy * cosine
-            candidate = (pos[0] + ux * chord, pos[1] + uy * chord)
-            if not _blocked(pos, candidate, polys):
+            ex = ox * cosine - oy * sine
+            ey = ox * sine + oy * cosine
+            found, alt = search((ix, iy), (ex, ey), (length, length * 0.62, length * 0.4), (0, 24, -24, 48, -48, 90, -90))
+            if found is not None:
+                return found, best
+            if alt is not None and (best is None or alt[0] < best[0]):
+                best = alt
+        if allow_bend and math.hypot(ix - ox, iy - oy) > 1e-3:
+            nx, ny = _unit(ix - ox, iy - oy)
+            tx, ty = -iy, ix
+            for scale in (0.45, 0.9, -0.45, -0.9, 1.4, -1.4, 2.0, -2.0):
+                ux, uy = _unit(ix + tx * scale, iy + ty * scale)
+                candidate = (pos[0] + ux * length, pos[1] + uy * length)
+                if _blocked(pos, candidate, polys):
+                    continue
+                vx, vy = _reflect(ux, uy, nx, ny)
+                pen = _leg_solid_pen(pos, candidate, 0.0, t0, t1, obstacles, segments, flown)
+                if pen <= 1e-6:
+                    return (candidate, ux, uy, vx, vy), best
+                if best is None or pen < best[0]:
+                    best = (pen, candidate, ux, uy, vx, vy)
+        return None, best
+
+    found, best = probe()
+    if found is not None:
+        return found
+    # No clear corridor. Shorten the walls this chord hits and look again.
+    for _ in range(3):
+        if best is None or not obstacles:
+            break
+        if not _shrink_blockers(pos, best[1], t0, t1, obstacles, segments, flown):
+            break
+        found, retry = probe()
+        if found is not None:
+            return found
+        if retry is not None and (best is None or retry[0] < best[0]):
+            best = retry
+        else:
+            break
+    if best is not None:
+        return best[1], best[2], best[3], best[4], best[5]
+    # Every solid-aware chord crossed the drawn path. Take a free heading anyway
+    # so a later beat is not boxed into that crossing.
+    for origin in ((ix, iy), (-ix, -iy)):
+        for chord in (length, length * 0.55, max(24.0, length * 0.3)):
+            for degrees in angles:
+                rad = math.radians(degrees)
+                cosine, sine = math.cos(rad), math.sin(rad)
+                ux = origin[0] * cosine - origin[1] * sine
+                uy = origin[0] * sine + origin[1] * cosine
+                candidate = (pos[0] + ux * chord, pos[1] + uy * chord)
+                if _blocked(pos, candidate, polys):
+                    continue
+                vx = ox * cosine - oy * sine
+                vy = ox * sine + oy * cosine
                 return candidate, ux, uy, vx, vy
-    nx, ny = _unit(ix - ox, iy - oy)
-    tx, ty = -iy, ix
-    for scale in (0.45, 0.9, -0.45, -0.9, 1.4, -1.4, 2.0, -2.0):
-        ux, uy = _unit(ix + tx * scale, iy + ty * scale)
-        candidate = (pos[0] + ux * length, pos[1] + uy * length)
-        if not _blocked(pos, candidate, polys):
-            vx, vy = _reflect(ux, uy, nx, ny)
-            return candidate, ux, uy, vx, vy
     return hit, ix, iy, ox, oy
 
 
@@ -615,13 +984,14 @@ def _align_bounce_normals(obstacles, segments) -> None:
 
 
 def _blocked(a, b, polys) -> bool:
-    # The newest segment shares its end with this departure. A shallow corridor
-    # stays near that corner; only a fold that lands back on the line counts.
+    # The newest segment shares its end with this departure. The corner may
+    # leave that line, but the new end is where the next leg starts, so it has
+    # to sit a full clearance away or the following beat is boxed in.
     for index, (c, d, bow) in enumerate(polys):
         recent = index == len(polys) - 1
         for p, q in _poly_pieces(c, d, bow):
             if recent:
-                if _folds_back(a, b, p, q):
+                if _folds_back(a, b, p, q) or _segment_distance(b, b, p, q) < CLEARANCE:
                     return True
                 continue
             if _intersects(a, b, p, q) or _segment_distance(a, b, p, q) < CLEARANCE:
@@ -783,13 +1153,19 @@ def _pieces_clearance(left: Segment, right: Segment) -> float:
     return best
 
 
-def _fit_bow(a, b, magnitude: float, polys) -> float:
+def _fit_bow(a, b, magnitude: float, polys, obstacles=None, segments=None, t0=0.0, t1=1.0) -> float:
     if magnitude < 1.0:
         return 0.0
+    obstacles = list(obstacles or [])
+    segments = list(segments or [])
+    flown = _flown_points(segments)
     for sign in (1.0, -1.0):
         bow = magnitude * sign
-        if not _curve_blocked(a, b, bow, polys):
-            return bow
+        if _curve_blocked(a, b, bow, polys):
+            continue
+        if _leg_solid_pen(a, b, bow, t0, t1, obstacles, segments, flown) > 1e-6:
+            continue
+        return bow
     return 0.0
 
 
