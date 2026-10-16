@@ -12,7 +12,7 @@ from pathlib import Path
 from music2video.analysis import analyze
 from music2video.encode import FfmpegEncoder
 from music2video.render import CairoRenderer
-from music2video.scene import Scene
+from music2video.scene import build_scene
 
 ASPECTS = {
     "16:9": (1920, 1080),
@@ -28,6 +28,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("-i", "--input", type=Path, required=True, help="wav, mp3, or anything ffmpeg can read")
     parser.add_argument("-o", "--output", type=Path, required=True, help="destination mp4")
     parser.add_argument("--aspect", choices=sorted(ASPECTS), default="16:9")
+    parser.add_argument("--scene", choices=("map", "balls"), default="map", help="map: one ball through a beat map; balls: the older multi-ball field")
     parser.add_argument("--fps", type=int, default=30)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--crf", type=int, default=20)
@@ -57,7 +58,7 @@ def render_video(args: argparse.Namespace) -> dict:
     width, height = ASPECTS[args.aspect]
     with tempfile.TemporaryDirectory(prefix="music2video-") as tmp:
         analysis = analyze(args.input, Path(tmp), max_seconds=args.max_seconds)
-        scene = Scene.create(width, height, seed=args.seed)
+        scene = build_scene(args.scene, width, height, analysis, args.seed)
         renderer = CairoRenderer(width, height)
         encoder = FfmpegEncoder(args.output, width, height, args.fps, analysis.wav_path, crf=args.crf)
         flags = strong_flags(analysis.beats, analysis.strong_beats)
@@ -68,19 +69,20 @@ def render_video(args: argparse.Namespace) -> dict:
             for frame in range(nframes):
                 t0 = frame * dt
                 t1 = t0 + dt
-                beat = False
-                strong = False
+                events: list[tuple[float, bool]] = []
                 while beat_index < len(analysis.beats) and analysis.beats[beat_index] < t1:
                     if analysis.beats[beat_index] >= t0:
-                        beat = True
-                        strong = strong or flags[beat_index]
+                        events.append((analysis.beats[beat_index], flags[beat_index]))
                     beat_index += 1
-                scene.update(dt, beat, strong)
+                # The frame that contains a beat is drawn at that beat, so the hit is the picture.
+                sample = events[0][0] if events else t0
+                scene.update(dt, sample, events)
                 encoder.write_frame(renderer.draw(scene))
                 if frame % args.fps == 0:
                     print(f"\rframe {frame}/{nframes}", file=sys.stderr, end="")
         finally:
             encoder.close()
+        timing = getattr(scene, "timing", None)
         payload = {
             "tempo": analysis.tempo,
             "beats": analysis.beats,
@@ -89,15 +91,29 @@ def render_video(args: argparse.Namespace) -> dict:
             "width": width,
             "height": height,
             "fps": args.fps,
+            "scene": args.scene,
             "output": str(args.output),
         }
+        if timing:
+            payload["hit_timing"] = timing
+            kinds = []
+            for obs in getattr(scene, "obstacles", []):
+                kinds.append({"time": obs.hit_time, "kind": obs.kind, "strong": obs.strong, "section": obs.section})
+            payload["obstacles"] = kinds
     print(file=sys.stderr)
     if args.dump_beats is not None:
         args.dump_beats.parent.mkdir(parents=True, exist_ok=True)
         args.dump_beats.write_text(json.dumps(payload, indent=2) + "\n")
+    timing = payload.get("hit_timing")
+    extra = ""
+    if timing:
+        extra = (
+            f", hit timing max {timing['max_timing_error_s'] * 1000:.3f} ms"
+            f", position {timing['max_position_error_px']:.4f} px"
+        )
     print(
         f"tempo {analysis.tempo:.2f} BPM, {len(analysis.beats)} beats, "
-        f"{len(analysis.strong_beats)} strong, wrote {args.output}"
+        f"{len(analysis.strong_beats)} strong, scene {args.scene}{extra}, wrote {args.output}"
     )
     return payload
 

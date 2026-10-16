@@ -14,6 +14,14 @@ N_FFT = 2048
 
 
 @dataclass(frozen=True)
+class Section:
+    start: float
+    end: float
+    energy: float
+    label: str
+
+
+@dataclass(frozen=True)
 class Analysis:
     tempo: float
     beats: list[float]
@@ -21,6 +29,10 @@ class Analysis:
     duration: float
     sample_rate: int
     wav_path: Path
+    sections: tuple[Section, ...] = ()
+    rms_times: tuple[float, ...] = ()
+    rms: tuple[float, ...] = ()
+    bands: tuple[tuple[float, ...], ...] = ()
 
 
 def decode_wav(source: Path, destination: Path, max_seconds: float | None) -> None:
@@ -46,15 +58,19 @@ def analyze(source: Path, workdir: Path, max_seconds: float | None = None) -> An
     beat_frames = np.asarray(beat_frames, dtype=int)
     times = [float(t) for t in librosa.frames_to_time(beat_frames, sr=sr, hop_length=HOP)]
     strong = _strong_beats(y, sr, beat_frames, times)
-    result = Analysis(
+    rms_times, rms, bands, sections = _sections_and_bands(y, int(sr))
+    return Analysis(
         tempo=tempo_f,
         beats=times,
         strong_beats=strong,
         duration=float(len(y) / sr),
         sample_rate=int(sr),
         wav_path=wav_path,
+        sections=tuple(sections),
+        rms_times=tuple(rms_times),
+        rms=tuple(rms),
+        bands=tuple(tuple(row) for row in bands),
     )
-    return result
 
 
 def _strong_beats(y: np.ndarray, sr: int, beat_frames: np.ndarray, times: list[float]) -> list[float]:
@@ -71,3 +87,68 @@ def _strong_beats(y: np.ndarray, sr: int, beat_frames: np.ndarray, times: list[f
     values = onset[np.clip(beat_frames, 0, len(onset) - 1)]
     threshold = float(np.median(values)) * 1.35
     return [time for time, value in zip(times, values) if value >= threshold and value > 0]
+
+
+def section_at(sections: tuple[Section, ...] | list[Section], time: float) -> Section:
+    for section in sections:
+        if section.start <= time < section.end:
+            return section
+    if sections:
+        return sections[-1]
+    return Section(0.0, 1e9, 0.4, "mid")
+
+
+def _sections_and_bands(y: np.ndarray, sr: int):
+    """RMS, 8 log-frequency bands, and 2s calm/mid/intense sections."""
+    frame = 2048
+    hop = 1024
+    if len(y) < frame:
+        return [0.0], [0.0], [[0.0] * 8], [Section(0.0, max(len(y) / sr, 1e-3), 0.4, "mid")]
+    window = np.hanning(frame)
+    freqs = np.fft.rfftfreq(frame, 1.0 / sr)
+    edges = np.geomspace(40.0, 8000.0, 9)
+    times: list[float] = []
+    rms_vals: list[float] = []
+    bands: list[list[float]] = []
+    for start in range(0, len(y) - frame, hop):
+        chunk = y[start : start + frame] * window
+        spec = np.abs(np.fft.rfft(chunk))
+        row = []
+        for lo, hi in zip(edges[:-1], edges[1:]):
+            mask = (freqs >= lo) & (freqs < hi)
+            row.append(float(spec[mask].mean()) if np.any(mask) else 0.0)
+        times.append((start + frame / 2) / sr)
+        rms_vals.append(float(np.sqrt(np.mean(chunk * chunk))))
+        bands.append(row)
+    rms_arr = np.asarray(rms_vals, dtype=np.float64)
+    band_arr = np.asarray(bands, dtype=np.float64)
+    scale = float(np.percentile(rms_arr, 95)) + 1e-9
+    rms_norm = np.clip(rms_arr / scale, 0.0, 1.0)
+    for col in range(band_arr.shape[1]):
+        col_scale = float(np.percentile(band_arr[:, col], 95)) + 1e-9
+        band_arr[:, col] = np.clip(band_arr[:, col] / col_scale, 0.0, 1.0)
+    duration = len(y) / sr
+    sections: list[Section] = []
+    cursor = 0.0
+    time_arr = np.asarray(times)
+    while cursor < duration - 1e-6:
+        end = min(duration, cursor + 2.0)
+        mask = (time_arr >= cursor) & (time_arr < end)
+        energy = float(rms_norm[mask].mean()) if np.any(mask) else 0.0
+        sections.append(Section(cursor, end, energy, "mid"))
+        cursor = end
+    energies = np.asarray([item.energy for item in sections], dtype=np.float64)
+    if len(energies) >= 3:
+        low, high = np.quantile(energies, [0.34, 0.67])
+    else:
+        low, high = 0.35, 0.62
+    labeled = []
+    for item in sections:
+        if item.energy <= low:
+            label = "calm"
+        elif item.energy >= high:
+            label = "intense"
+        else:
+            label = "mid"
+        labeled.append(Section(item.start, item.end, item.energy, label))
+    return times, rms_norm.tolist(), band_arr.tolist(), labeled

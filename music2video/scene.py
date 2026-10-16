@@ -1,4 +1,4 @@
-"""Balls, wall bounces, and beat effects. Rendering is someone else's job."""
+"""Scene models. `balls` is the original multi-ball field; `map` is the default journey."""
 
 from __future__ import annotations
 
@@ -159,7 +159,10 @@ class Scene:
             effects=[BounceEffect(), ColorEffect(), ParticleBurstEffect()],
         )
 
-    def update(self, dt: float, beat: bool, strong: bool) -> None:
+    def update(self, dt: float, time: float, events: list[tuple[float, bool]]) -> None:
+        del time
+        beat = bool(events)
+        strong = any(flag for _, flag in events)
         if beat:
             for effect in self.effects:
                 effect.on_beat(self, strong)
@@ -192,3 +195,13 @@ class Scene:
             if particle.life > 0:
                 alive.append(particle)
         self.particles = alive
+
+
+def build_scene(kind: str, width: int, height: int, analysis, seed: int):
+    if kind == "balls":
+        return Scene.create(width, height, seed=seed)
+    if kind == "map":
+        from music2video.mapscene import MapScene
+
+        return MapScene.create(width, height, analysis, seed)
+    raise SystemExit(f"unknown scene {kind}")
