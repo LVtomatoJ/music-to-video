@@ -176,11 +176,30 @@ export function auditMap(state: MapState): {
   };
 }
 
-function velocity(segments: Segment[], time: number): [number, number] {
-  const dt = BAKE_DT;
-  const before = pointOn(segments, time - dt);
-  const after = pointOn(segments, time + dt);
-  return [(after[0] - before[0]) / (2 * dt), (after[1] - before[1]) / (2 * dt)];
+/** Recent bounces kept on screen together: the trail, the walls, and the camera share this window. */
+const HISTORY = 12;
+
+function recentRange(obstacles: Obstacle[], time: number): { from: number; to: number } {
+  let to = obstacles.length;
+  while (to > 0 && obstacles[to - 1].hitTime > time + 1e-3) to -= 1;
+  return { from: Math.max(0, to - HISTORY), to };
+}
+
+/** Start of the leg that arrives at the oldest visible wall, so that wall still has a trail. */
+function historyStart(segments: Segment[], obstacles: Obstacle[], time: number): number {
+  const { from, to } = recentRange(obstacles, time);
+  if (from >= to) return segments[0]?.t0 ?? 0;
+  const oldest = obstacles[from].hitTime;
+  for (const segment of segments) {
+    if (Math.abs(segment.t1 - oldest) < 1e-2) return segment.t0;
+  }
+  return Math.max(segments[0]?.t0 ?? 0, oldest);
+}
+
+function ageFade(time: number, when: number, start: number): number {
+  const span = Math.max(0.25, time - start);
+  const along = clamp(1 - (time - when) / span, 0, 1);
+  return 0.5 + 0.5 * along;
 }
 
 function cameraTarget(
@@ -193,9 +212,6 @@ function cameraTarget(
   energy: number,
 ): [number, number, number] {
   const ball = pointOn(segments, time);
-  const [vx, vy] = velocity(segments, time);
-  const aheadX = ball[0] + vx * 0.16;
-  const aheadY = ball[1] + vy * 0.16;
   let minX = Infinity;
   let maxX = -Infinity;
   let minY = Infinity;
@@ -207,28 +223,26 @@ function cameraTarget(
     minY = Math.min(minY, y - pad);
     maxY = Math.max(maxY, y + pad);
   };
-  const start = Math.max(segments[0]?.t0 ?? 0, time - 11);
-  const end = time + 0.55;
-  for (let cursor = start; cursor <= end; cursor += 0.18) {
-    const point = pointOn(segments, cursor);
-    consider(point[0], point[1], ballR * 2);
+  const start = historyStart(segments, obstacles, time);
+  for (let cursor = start; cursor <= time + 1e-6; cursor += 0.12) {
+    const point = pointOn(segments, Math.min(cursor, time));
+    consider(point[0], point[1], ballR + 24);
   }
-  consider(ball[0], ball[1], 80);
-  consider(aheadX, aheadY, 40);
-  for (const obstacle of obstacles) {
-    if (obstacle.hitTime < start || obstacle.hitTime > end) continue;
-    consider(obstacle.x, obstacle.y, 90);
+  consider(ball[0], ball[1], ballR + 36);
+  const { from, to } = recentRange(obstacles, time);
+  for (let index = from; index < to; index++) {
+    consider(obstacles[index].x, obstacles[index].y, 120);
   }
   if (!Number.isFinite(minX) || !Number.isFinite(ball[0]) || !Number.isFinite(ball[1])) {
-    return [Number.isFinite(ball[0]) ? ball[0] : 0, Number.isFinite(ball[1]) ? ball[1] : 0, 0.62];
+    return [Number.isFinite(ball[0]) ? ball[0] : 0, Number.isFinite(ball[1]) ? ball[1] : 0, 0.7];
   }
-  const spanX = Math.max(maxX - minX, 980);
-  const spanY = Math.max(maxY - minY, 640);
-  const fitted = Math.min((width * 0.88) / spanX, (height * 0.84) / spanY);
-  const zoom = clamp(fitted, 0.46, 0.78) * (1 + 0.03 * (Number.isFinite(energy) ? energy : 0));
-  const cx = (minX + maxX) * 0.62 + (Number.isFinite(aheadX) ? aheadX : ball[0]) * 0.38;
-  const cy = (minY + maxY) * 0.62 + (Number.isFinite(aheadY) ? aheadY : ball[1]) * 0.38;
-  return [Number.isFinite(cx) ? cx : ball[0], Number.isFinite(cy) ? cy : ball[1], Number.isFinite(zoom) ? zoom : 0.62];
+  const spanX = Math.max(maxX - minX, 360);
+  const spanY = Math.max(maxY - minY, 220);
+  const fitted = Math.min((width * 0.8) / spanX, (height * 0.8) / spanY);
+  const zoom = clamp(fitted, 0.1, 1.7) * (1 + 0.015 * clamp(Number.isFinite(energy) ? energy : 0, 0, 1));
+  const cx = (minX + maxX) / 2;
+  const cy = (minY + maxY) / 2;
+  return [Number.isFinite(cx) ? cx : ball[0], Number.isFinite(cy) ? cy : ball[1], Number.isFinite(zoom) ? zoom : 0.7];
 }
 
 function bakeCamera(
@@ -269,7 +283,7 @@ function bakeCamera(
   return { x, y, z };
 }
 
-/** Keeps the ball inside the frame even when the baked camera or the course is bad. */
+/** Nudges a bad baked camera just enough to keep the ball inside the frame. */
 export function framedView(state: MapState, time: number): {
   camX: number;
   camY: number;
@@ -283,18 +297,22 @@ export function framedView(state: MapState, time: number): {
   let camX = Number.isFinite(sampleCurve(state.camX, BAKE_DT, time)) ? sampleCurve(state.camX, BAKE_DT, time) : worldX;
   let camY = Number.isFinite(sampleCurve(state.camY, BAKE_DT, time)) ? sampleCurve(state.camY, BAKE_DT, time) : worldY;
   let zoom = sampleCurve(state.camZ, BAKE_DT, time);
-  if (!Number.isFinite(zoom)) zoom = 0.62;
-  zoom = clamp(zoom, 0.35, 1.4);
-  let ballX = (worldX - camX) * zoom + state.width / 2;
-  let ballY = (worldY - camY) * zoom + state.height / 2;
-  const padX = state.width * 0.16;
-  const padY = state.height * 0.16;
-  if (ballX < padX || ballX > state.width - padX || ballY < padY || ballY > state.height - padY) {
+  if (!Number.isFinite(zoom) || zoom <= 0) zoom = 0.7;
+  zoom = clamp(zoom, 0.08, 1.85);
+  const margin = 48;
+  const limitX = state.width / 2 - margin;
+  const limitY = state.height / 2 - margin;
+  const dx = Math.abs(worldX - camX);
+  const dy = Math.abs(worldY - camY);
+  const zoomCap = Math.min(dx > 1 ? limitX / dx : zoom, dy > 1 ? limitY / dy : zoom);
+  if (zoomCap < zoom && zoomCap >= 0.1) zoom = zoomCap;
+  else if (zoomCap < 0.1) {
     camX = worldX;
     camY = worldY;
-    ballX = state.width / 2;
-    ballY = state.height / 2;
+    zoom = clamp(zoom, 0.35, 1.2);
   }
+  const ballX = (worldX - camX) * zoom + state.width / 2;
+  const ballY = (worldY - camY) * zoom + state.height / 2;
   return { camX, camY, zoom, ballX, ballY };
 }
 
@@ -357,8 +375,9 @@ function paintMap(
     (x - camX) * zoom + state.width / 2,
     (y - camY) * zoom + state.height / 2,
   ];
-  paintCourse(ctx, state, time, project, zoom);
-  for (const obstacle of state.obstacles) paintObstacle(ctx, state, obstacle, time - obstacle.hitTime, project, zoom);
+  const trailStart = historyStart(state.segments, state.obstacles, time);
+  paintCourse(ctx, state, time, trailStart, project, zoom);
+  for (const obstacle of state.obstacles) paintObstacle(ctx, state, obstacle, time, trailStart, project, zoom);
   paintRings(ctx, state, time, project, zoom);
   paintBall(ctx, state, framed.ballX, framed.ballY, state.ballR * zoom, pulse);
   view.post.glow = state.light ? 0.35 : 0.85 + 0.2 * pulse;
@@ -370,32 +389,32 @@ function paintCourse(
   ctx: CanvasRenderingContext2D,
   state: MapState,
   time: number,
+  start: number,
   project: (x: number, y: number) => [number, number],
   zoom: number,
 ): void {
-  const span = 14;
-  const points = coursePoints(state, time, span).map((point) => {
+  const points = coursePoints(state, time, start).map((point) => {
     const [x, y] = project(point.x, point.y);
     return { x, y, t: point.t };
   });
   if (points.length < 2) return;
-  paintRibbon(ctx, points, time, span, 18 * zoom, state.skin.ball, state.light ? 0.28 : 0.45);
-  paintRibbon(ctx, points, time, span, 3.6 * zoom, [1, 1, 1], state.light ? 0.62 : 0.95);
+  paintRibbon(ctx, points, time, start, 18 * zoom, state.skin.ball, state.light ? 0.28 : 0.45);
+  paintRibbon(ctx, points, time, start, 3.6 * zoom, [1, 1, 1], state.light ? 0.62 : 0.95);
 }
 
-function coursePoints(state: MapState, time: number, span: number): { x: number; y: number; t: number }[] {
-  const start = Math.max(state.segments[0]?.t0 ?? 0, time - span);
+function coursePoints(state: MapState, time: number, start: number): { x: number; y: number; t: number }[] {
+  const from = Math.max(state.segments[0]?.t0 ?? 0, start);
   const points: { x: number; y: number; t: number }[] = [];
   const push = (t: number) => {
-    if (t < start - 1e-3 || t > time + 1e-3) return;
+    if (t < from - 1e-3 || t > time + 1e-3) return;
     const point = pointOn(state.segments, t);
     const last = points[points.length - 1];
     if (last && Math.abs(last.t - t) < 1e-3) return;
     points.push({ x: point[0], y: point[1], t });
   };
   for (const segment of state.segments) {
-    if (segment.t1 < start || segment.t0 > time) continue;
-    const t0 = Math.max(segment.t0, start);
+    if (segment.t1 < from || segment.t0 > time) continue;
+    const t0 = Math.max(segment.t0, from);
     const t1 = Math.min(segment.t1, time);
     const steps = Math.max(1, Math.round((t1 - t0) / 0.04));
     for (let step = 0; step <= steps; step++) push(t0 + ((t1 - t0) * step) / steps);
@@ -408,7 +427,7 @@ function paintRibbon(
   ctx: CanvasRenderingContext2D,
   points: { x: number; y: number; t: number }[],
   time: number,
-  span: number,
+  start: number,
   width: number,
   color: [number, number, number],
   alpha: number,
@@ -428,8 +447,7 @@ function paintRibbon(
     right.push({ x: points[index].x + dy * half, y: points[index].y - dx * half });
   }
   for (let index = 1; index < points.length; index++) {
-    const fade = clamp(1 - (time - points[index].t) / span, 0, 1) ** 1.15;
-    if (fade < 0.03) continue;
+    const fade = ageFade(time, points[index].t, start);
     ctx.fillStyle = rgba(color[0], color[1], color[2], alpha * fade);
     ctx.beginPath();
     ctx.moveTo(left[index - 1].x, left[index - 1].y);
@@ -441,22 +459,24 @@ function paintRibbon(
   }
 }
 
-function presence(age: number): number {
-  if (age < -0.4 || age > 24) return 0;
-  const born = age < 0 ? smoothstep((age + 0.4) / 0.4) : 1;
-  const fade = age > 9 ? clamp(1 - (age - 9) / 15, 0, 1) : 1;
-  return born * fade;
+function wallFade(time: number, hitTime: number, start: number): number {
+  const age = time - hitTime;
+  if (hitTime < start - 1e-3 || age < -0.02) return 0;
+  const born = age < 0.12 ? smoothstep(clamp((age + 0.02) / 0.14, 0, 1)) : 1;
+  return born * ageFade(time, hitTime, start);
 }
 
 function paintObstacle(
   ctx: CanvasRenderingContext2D,
   state: MapState,
   obstacle: Obstacle,
-  age: number,
+  time: number,
+  trailStart: number,
   project: (x: number, y: number) => [number, number],
   zoom: number,
 ): void {
-  const alpha = presence(age);
+  const age = time - obstacle.hitTime;
+  const alpha = wallFade(time, obstacle.hitTime, trailStart);
   if (alpha <= 0.02) return;
   const flash = age >= 0 && age < 0.32 ? 1 - age / 0.32 : 0;
   const color = mixWhite(kindColor(state, obstacle.kind), 0.7 * flash);

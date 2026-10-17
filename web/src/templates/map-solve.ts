@@ -110,11 +110,8 @@ export function solveMap(music: MusicData, seed: number, skinName: string): { ob
   let lane = (xorshift32(rng) * 2 - 1) * Math.PI;
   let side = xorshift32(rng) < 0.5 ? 1 : -1;
   let heading = lane + side * SPREAD;
-  let rowLen = 4;
-  let rowLeft = rowLen;
   let turns = 0;
   let stepOut = false;
-  let held = 0;
   let pos: Pt = [0, 0];
   let tPrev = 0;
   if (deduped[0][0] > 1e-3) {
@@ -133,8 +130,8 @@ export function solveMap(music: MusicData, seed: number, skinName: string): { ob
   deduped.forEach(([beat, isStrong], index) => {
     try {
     const section = phraseAt(phrases, beat);
-    const [phrase, speed, spread, bowFrac, extend] = phraseMotion(section.label, index, isStrong);
-    if (extend && phrase !== lastPhrase) rowLeft += 2;
+    const [phrase, speed, spread, extend] = phraseMotion(section.label, index, isStrong);
+    if (extend && phrase !== lastPhrase) stepOut = true;
     lastPhrase = phrase;
     let travel = heading;
     if (obstacles.length >= 8 && insideCloud(pos, obstacles, 160)) travel = nudgeOut(pos, heading, obstacles);
@@ -146,37 +143,25 @@ export function solveMap(music: MusicData, seed: number, skinName: string): { ob
       length *= 1.55;
       stepOut = false;
     }
-    let hit: Pt = [pos[0] + ivx * length, pos[1] + ivy * length];
-    let nextLane = lane;
-    let nextSide = -side;
-    let nextSpread = spread;
-    rowLeft -= 1;
-    let wantTurn = rowLeft <= 0;
-    // A square turn whose next side would run back through the cloud waits,
-    // but only briefly: a long hold is what stretches one heading across the frame.
+    // Hold a gentle bend for a few bounces, then bend the other way.
+    // The leg is aimed from the previous segment, so avoidance cannot straighten it into a corridor.
     const turnSign = turns % 8 < 4 ? 1 : -1;
-    if (wantTurn && held < 3 && obstacles.length >= 8) {
-      const nextDir = lane + turnSign * Math.PI / 2;
-      if (roomAhead(pos, heading, obstacles) > 700 && roomAhead(pos, nextDir, obstacles) < 1100) {
-        wantTurn = false;
-        rowLeft = 1;
-        held += 1;
-        stepOut = true;
-      }
-    }
-    if (wantTurn) {
-      held = 0;
-      nextLane = lane + turnSign * Math.PI / 2;
-      turns += 1;
-      if (turns % 2 === 0) rowLen = Math.min(5, rowLen + 1);
-      rowLeft = rowLen;
-      nextSpread = phrase === "cluster" ? 0.22 : 0.12;
-      nextSide = side;
-      stepOut = true;
-    }
-    let [ovx, ovy] = unit(Math.cos(nextLane + nextSide * nextSpread), Math.sin(nextLane + nextSide * nextSpread));
-    const planned = Math.atan2(ovy, ovx);
-    [hit, ivx, ivy, ovx, ovy] = steerClear(pos, hit, [ivx, ivy], [ovx, ovy], polys, length, obstacles, segments, tPrev, beat);
+    turns += 1;
+    const wobble = ((index % 5) - 2) * 0.045;
+    const prevSeg = segments[segments.length - 1];
+    const base = prevSeg ? Math.atan2(prevSeg.y1 - prevSeg.y0, prevSeg.x1 - prevSeg.x0) : heading;
+    const flown = base + turnSign * 0.5 + wobble;
+    let [ivx2, ivy2] = unit(Math.cos(flown), Math.sin(flown));
+    let hit: Pt = [pos[0] + ivx2 * length, pos[1] + ivy2 * length];
+    const nextLane = flown;
+    const nextSide = side;
+    const nextSpread = Math.min(spread, 0.08);
+    const out = flown + turnSign * 0.32 + nextSide * nextSpread;
+    let [ovx, ovy] = unit(Math.cos(out), Math.sin(out));
+    const planned = out;
+    [hit, ivx2, ivy2, ovx, ovy] = limitTurn(prevSeg, pos, hit, ivx2, ivy2, ovx, ovy);
+    ivx = ivx2;
+    ivy = ivy2;
     const kind = chooseKind(pool, isStrong, counts, lastKind, rng);
     counts[kind] += 1;
     lastKind = kind;
@@ -191,8 +176,7 @@ export function solveMap(music: MusicData, seed: number, skinName: string): { ob
     size = Math.min(420, size * (VARIANT_SCALE[variant] ?? 1) * SECTION_SIZE[section.label]);
     size = capSize(hit, size, obstacles);
     const pegR = kind === "peg" ? size : 0;
-    let bow = 0;
-    if (phrase === "curve") bow = fitBow(pos, hit, Math.min(18, bowFrac * length), polys, obstacles, segments, tPrev, beat);
+    const bow = 0;
     if (obstacles.length && segments.length) {
       const arrival = tangent(segments[segments.length - 1], true);
       const departure = tangentOf(pos, hit, bow, false);
@@ -240,7 +224,8 @@ export function solveMap(music: MusicData, seed: number, skinName: string): { ob
       const dist = 680 * (music.duration - tPrev);
       const guess: Pt = [pos[0] + ivx * dist, pos[1] + ivy * dist];
       const routed = avoidOverlap(pos, guess, [ivx, ivy], [ivx, ivy], polys, dist, obstacles, segments, tPrev, music.duration, false);
-      const end = routed[0];
+      const limited = limitTurn(segments[segments.length - 1], pos, routed[0], routed[1], routed[2], routed[3], routed[4]);
+      const end = limited[0];
       segments.push({
         t0: tPrev,
         t1: music.duration,
@@ -277,16 +262,18 @@ function pushStraight(
   const [ux, uy] = unit(Math.cos(heading), Math.sin(heading));
   const originX = Number.isFinite(pos[0]) ? pos[0] : 0;
   const originY = Number.isFinite(pos[1]) ? pos[1] : 0;
-  const hit: Pt = [originX + ux * 220, originY + uy * 220];
+  const aimed: Pt = [originX + ux * 220, originY + uy * 220];
+  const limited = limitTurn(segments[segments.length - 1], [originX, originY], aimed, ux, uy, ux, uy);
+  const hit = limited[0];
   obstacles.push({
     kind: "wall",
     hitTime: Number.isFinite(beat) ? beat : tPrev,
     x: hit[0],
     y: hit[1],
-    nx: -uy,
-    ny: ux,
-    tx: ux,
-    ty: uy,
+      nx: -limited[2],
+      ny: limited[1],
+      tx: limited[1],
+      ty: limited[2],
     strong,
     energy: 0.4,
     section: "mid",
@@ -318,7 +305,7 @@ function sanitizeCourse(obstacles: Obstacle[], segments: Segment[], duration: nu
     segment.y0 = num(segment.y0);
     segment.x1 = num(segment.x1, segment.x0 + 200);
     segment.y1 = num(segment.y1, segment.y0);
-    segment.bow = num(segment.bow);
+    segment.bow = 0;
   }
   for (const obstacle of obstacles) {
     obstacle.x = num(obstacle.x);
@@ -404,14 +391,14 @@ function phraseAt(sections: PhraseSection[], time: number): PhraseSection {
   return sections[sections.length - 1];
 }
 
-function phraseMotion(label: Mood, index: number, strong: boolean): [Phrase, number, number, number, boolean] {
-  if (label === "intense" && index % 10 !== 0) return ["cluster", 560, strong ? 0.48 : 0.4, 0, false];
+function phraseMotion(label: Mood, index: number, strong: boolean): [Phrase, number, number, boolean] {
+  if (label === "intense" && index % 10 !== 0) return ["cluster", 560, strong ? 0.48 : 0.4, false];
   if (label === "calm") {
-    if (Math.floor(index / 4) % 2 === 0) return ["stretch", 860, 0.22, 0, true];
-    return ["corridor", 680, 0.36, 0, false];
+    if (Math.floor(index / 4) % 2 === 0) return ["stretch", 860, 0.22, true];
+    return ["corridor", 680, 0.36, false];
   }
-  if (index % 3 !== 2) return ["curve", 640, 0.5, 0.12, false];
-  return ["corridor", 720, 0.32, 0, false];
+  if (index % 3 !== 2) return ["curve", 640, 0.5, false];
+  return ["corridor", 720, 0.32, false];
 }
 
 function bases(kind: string): number {
@@ -472,20 +459,39 @@ function insideCloud(pos: Pt, obstacles: Obstacle[], margin: number): boolean {
   return pos[0] >= minX - margin && pos[0] <= maxX + margin && pos[1] >= minY - margin && pos[1] <= maxY + margin;
 }
 
-function roomAhead(pos: Pt, angle: number, obstacles: Obstacle[]): number {
-  const dx = Math.cos(angle);
-  const dy = Math.sin(angle);
-  let room = 4200;
-  for (const obs of obstacles) {
-    const vx = obs.x - pos[0];
-    const vy = obs.y - pos[1];
-    const along = vx * dx + vy * dy;
-    if (along < 60) continue;
-    const lateral = Math.abs(vx * dy - vy * dx);
-    const half = obs.size * 0.5 + 220;
-    if (lateral < half) room = Math.min(room, along - half);
-  }
-  return room;
+/** Keep each bounce turning forward. A larger kink folds the trail back into a Z. */
+const MAX_TURN = (52 * Math.PI) / 180;
+
+function limitTurn(
+  prev: Segment | undefined,
+  pos: Pt,
+  hit: Pt,
+  ivx: number,
+  ivy: number,
+  ovx: number,
+  ovy: number,
+): [Pt, number, number, number, number] {
+  if (!prev) return [hit, ivx, ivy, ovx, ovy];
+  const [ux, uy] = unit(prev.x1 - prev.x0, prev.y1 - prev.y0);
+  const dx = hit[0] - pos[0];
+  const dy = hit[1] - pos[1];
+  const len = Math.hypot(dx, dy);
+  if (!(len > 1)) return [hit, ivx, ivy, ovx, ovy];
+  const vx = dx / len;
+  const vy = dy / len;
+  const dot = Math.max(-1, Math.min(1, ux * vx + uy * vy));
+  const cross = ux * vy - uy * vx;
+  const angle = Math.atan2(cross, dot);
+  if (Math.abs(angle) <= MAX_TURN) return [hit, ivx, ivy, ovx, ovy];
+  const capped = Math.sign(angle) * MAX_TURN;
+  const cosine = Math.cos(capped);
+  const sine = Math.sin(capped);
+  const nx = ux * cosine - uy * sine;
+  const ny = ux * sine + uy * cosine;
+  const delta = capped - angle;
+  const oc = Math.cos(delta);
+  const os = Math.sin(delta);
+  return [[pos[0] + nx * len, pos[1] + ny * len], nx, ny, ovx * oc - ovy * os, ovx * os + ovy * oc];
 }
 
 function nudgeOut(pos: Pt, heading: number, obstacles: Obstacle[]): number {
@@ -504,44 +510,6 @@ function aimsInto(origin: Pt, angle: number, obstacles: Obstacle[]): boolean {
   const dist = Math.hypot(vx, vy);
   if (dist < 1) return true;
   return (Math.cos(angle) * vx + Math.sin(angle) * vy) / dist > 0.3;
-}
-
-function steerClear(
-  pos: Pt,
-  hit: Pt,
-  incoming: Pt,
-  outgoing: Pt,
-  polys: Poly[],
-  length: number,
-  obstacles: Obstacle[],
-  segments: Segment[],
-  t0: number,
-  t1: number,
-): [Pt, number, number, number, number] {
-  const routed = avoidOverlap(pos, hit, incoming, outgoing, polys, length, obstacles, segments, t0, t1, true);
-  if (obstacles.length < 3) return routed;
-  const clearance = (point: Pt) => Math.min(...obstacles.map((obs) => Math.hypot(point[0] - obs.x, point[1] - obs.y) - obs.size * 0.5));
-  let best = routed;
-  let bestGap = clearance(routed[0]);
-  if (bestGap >= MIN_BODY * 0.5 + BODY_GAP) return routed;
-  for (const degrees of [28, -28, 48, -48, 72, -72, 96, -96]) {
-    const rad = (degrees * Math.PI) / 180;
-    const cosine = Math.cos(rad);
-    const sine = Math.sin(rad);
-    const nix = incoming[0] * cosine - incoming[1] * sine;
-    const niy = incoming[0] * sine + incoming[1] * cosine;
-    const nox = outgoing[0] * cosine - outgoing[1] * sine;
-    const noy = outgoing[0] * sine + outgoing[1] * cosine;
-    const trialHit: Pt = [pos[0] + nix * length, pos[1] + niy * length];
-    const trial = avoidOverlap(pos, trialHit, [nix, niy], [nox, noy], polys, length, obstacles, segments, t0, t1, true);
-    const trialGap = clearance(trial[0]);
-    if (trialGap > bestGap + 28) {
-      best = trial;
-      bestGap = trialGap;
-      if (trialGap >= MIN_BODY * 0.5 + BODY_GAP + 24) break;
-    }
-  }
-  return best;
 }
 
 function avoidOverlap(
@@ -563,7 +531,7 @@ function avoidOverlap(
   const oy = outgoing[1];
   const flown = flownPoints(segments);
   const angles = [0];
-  for (const degrees of [12, 22, 34, 48, 66, 84, 110, 140, 168]) angles.push(degrees, -degrees);
+  for (const degrees of [12, 22, 34, 46]) angles.push(degrees, -degrees);
   const search = (originIn: Pt, originOut: Pt, chords: number[], yaw: number[]) => {
     let best: [number, Pt, number, number, number, number] | null = null;
     for (const chord of chords) {
@@ -588,13 +556,13 @@ function avoidOverlap(
   const probe = () => {
     let result = search([ix, iy], [ox, oy], [length, length * 0.78, length * 0.58, length * 0.4, length * 0.28], angles);
     if (result.found) return result;
-    for (const extra of [32, -32, 58, -58, 90, -90, 130, -130, 175, -175]) {
+    for (const extra of [24, -24, 40, -40]) {
       const rad = (extra * Math.PI) / 180;
       const cosine = Math.cos(rad);
       const sine = Math.sin(rad);
       const ex = ox * cosine - oy * sine;
       const ey = ox * sine + oy * cosine;
-      const alt = search([ix, iy], [ex, ey], [length, length * 0.62, length * 0.4], [0, 24, -24, 48, -48, 90, -90]);
+      const alt = search([ix, iy], [ex, ey], [length, length * 0.62, length * 0.4], [0, 16, -16, 32, -32, 46, -46]);
       if (alt.found) return { found: alt.found, best: result.best };
       if (alt.best && (!result.best || alt.best[0] < result.best[0])) result = { found: null, best: alt.best };
     }
@@ -602,7 +570,7 @@ function avoidOverlap(
       const [nx, ny] = unit(ix - ox, iy - oy);
       const tx = -iy;
       const ty = ix;
-      for (const bend of [0.45, 0.9, -0.45, -0.9, 1.4, -1.4, 2, -2]) {
+      for (const bend of [0.35, -0.35, 0.6, -0.6]) {
         const [ux, uy] = unit(ix + tx * bend, iy + ty * bend);
         const candidate: Pt = [pos[0] + ux * length, pos[1] + uy * length];
         if (blocked(pos, candidate, polys)) continue;
@@ -965,40 +933,6 @@ function capSize(hit: Pt, size: number, obstacles: Obstacle[]): number {
   }
   const room = best - nearest.size * 0.5 - BODY_GAP;
   return Math.min(size, Math.max(MIN_BODY, room * 2));
-}
-
-function curveBlocked(a: Pt, b: Pt, bow: number, polys: Poly[]): boolean {
-  let pieces = polyPieces(a, b, bow);
-  if (pieces.length > 1) pieces = pieces.slice(1);
-  for (const [c, d, other] of polys) {
-    for (const [p, q] of pieces) {
-      for (const [r, s] of polyPieces(c, d, other)) {
-        if (intersects(p, q, r, s) || segmentDistance(p, q, r, s) < CLEARANCE) return true;
-      }
-    }
-  }
-  return false;
-}
-
-function fitBow(
-  a: Pt,
-  b: Pt,
-  magnitude: number,
-  polys: Poly[],
-  obstacles: Obstacle[],
-  segments: Segment[],
-  t0: number,
-  t1: number,
-): number {
-  if (magnitude < 1) return 0;
-  const flown = flownPoints(segments);
-  for (const sign of [1, -1]) {
-    const bow = magnitude * sign;
-    if (curveBlocked(a, b, bow, polys)) continue;
-    if (legSolidPen(a, b, bow, t0, t1, obstacles, segments, flown) > 1e-6) continue;
-    return bow;
-  }
-  return 0;
 }
 
 function bodyBoxes(obs: Obstacle): [number, number, number, number][] {
