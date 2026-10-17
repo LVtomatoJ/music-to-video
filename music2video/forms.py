@@ -79,6 +79,9 @@ class Building:
     floors: int
     cols: int
     tower: bool
+    roof: int = 0
+    tint: int = 0
+    sign: int = 0
 
 
 @dataclass
@@ -101,6 +104,9 @@ class CityScene:
     bass_times: list[float]
     beat_times: list[float]
     born_lit: set[tuple[int, int, int]]
+    far: list[tuple[float, float, float, int]]
+    mid: list[tuple[float, float, float, int]]
+    sky_stars: list[tuple[float, float, float, float]]
     timing: dict
     sync_report: dict
     caption_title: str = ""
@@ -200,17 +206,21 @@ def _build_city(width: int, height: int, analysis: Analysis, seed: int) -> CityS
         beat = beats[index]
         section = section_at(analysis.sections, beat)
         energy = section.energy
-        block_w = 54.0 + xorshift32(rng) * 48.0
-        target = (150.0 + 280.0 * energy) * (0.82 + 0.22 * xorshift32(rng))
+        block_w = 34.0 + xorshift32(rng) * 92.0
+        target = (110.0 + 300.0 * energy) * (0.70 + 0.62 * xorshift32(rng))
         if energy >= 0.55:
-            target *= 1.18
-        target = min(target, height * 0.62)
-        floors = max(4, min(14, int(target / 38.0)))
-        cols = max(2, min(5, int(block_w / 20.0)))
-        specs.append((beat, block_w, target, energy, floors, cols, energy >= 0.62))
-    total = sum(item[1] for item in specs) + 26.0 * (len(specs) - 1)
+            target *= 1.08
+        target = min(max(target, 96.0), height * 0.58)
+        floors = max(3, min(16, int(target / 32.0)))
+        cols = max(2, min(6, int(block_w / 18.0)))
+        roof = int(xorshift32(rng) * 5)
+        tint = int(xorshift32(rng) * 5)
+        sign = int(xorshift32(rng) * 3) if xorshift32(rng) > 0.55 else 0
+        specs.append((beat, block_w, target, energy, floors, cols, energy >= 0.62 or roof == 3, roof, tint, sign))
+    gaps = [14.0 + xorshift32(rng) * 34.0 for _ in specs]
+    total = sum(item[1] for item in specs) + sum(gaps[:-1] if gaps else [])
     cursor = -total / 2.0
-    for beat, block_w, target, energy, floors, cols, tower in specs:
+    for (beat, block_w, target, energy, floors, cols, tower, roof, tint, sign), gap in zip(specs, gaps):
         buildings.append(
             Building(
                 born=beat,
@@ -222,9 +232,17 @@ def _build_city(width: int, height: int, analysis: Analysis, seed: int) -> CityS
                 floors=floors,
                 cols=cols,
                 tower=tower,
+                roof=roof,
+                tint=tint,
+                sign=sign,
             )
         )
-        cursor += block_w + 26.0
+        cursor += block_w + gap
+    pattern = (0.58, 1.25, 0.72, 1.4, 0.64, 1.08, 0.8, 1.48, 0.7, 1.16)
+    for index, building in enumerate(buildings):
+        building.target = min(height * 0.68, max(110.0, building.target * pattern[index % len(pattern)]))
+        building.floors = max(3, min(16, int(building.target / 30.0)))
+        building.cols = max(2, min(6, int(building.width / 18.0)))
     birth = {building.born for building in buildings}
     others = [beat for beat in beats if beat not in birth]
     cells = [(index, col, row) for index, building in enumerate(buildings) for row in range(building.floors) for col in range(building.cols)]
@@ -257,6 +275,17 @@ def _build_city(width: int, height: int, analysis: Analysis, seed: int) -> CityS
         bass = []
     if not bass:
         bass = list(analysis.strong_beats) or beats[::4]
+    far, mid = _skyline_layers(rng)
+    sky_stars = []
+    for _ in range(70):
+        sky_stars.append(
+            (
+                xorshift32(rng) * width,
+                xorshift32(rng) * height * 0.62,
+                0.6 + xorshift32(rng) * 1.3,
+                xorshift32(rng),
+            )
+        )
     scene = CityScene(
         form="city",
         palette_name="city",
@@ -268,6 +297,9 @@ def _build_city(width: int, height: int, analysis: Analysis, seed: int) -> CityS
         bass_times=bass,
         beat_times=list(beats),
         born_lit=born_lit,
+        far=far,
+        mid=mid,
+        sky_stars=sky_stars,
         timing={},
         sync_report={},
     )
@@ -286,66 +318,194 @@ def _build_city(width: int, height: int, analysis: Analysis, seed: int) -> CityS
     return scene
 
 
+_NIGHT_TONES = (
+    (0.09, 0.11, 0.20),
+    (0.14, 0.10, 0.22),
+    (0.07, 0.09, 0.14),
+    (0.16, 0.10, 0.16),
+    (0.08, 0.13, 0.17),
+)
+
+
+def _skyline_layers(rng: list[int]) -> tuple[list[tuple[float, float, float, int]], list[tuple[float, float, float, int]]]:
+    """Far and middle silhouettes. They are scenery, not beat hits."""
+    far: list[tuple[float, float, float, int]] = []
+    mid: list[tuple[float, float, float, int]] = []
+    x = -2400.0
+    while x < 2400.0:
+        width = 48.0 + xorshift32(rng) * 110.0
+        height = 28.0 + xorshift32(rng) * 100.0
+        far.append((x, width, height, int(xorshift32(rng) * 3)))
+        x += width * (0.55 + xorshift32(rng) * 0.35)
+    x = -2200.0
+    while x < 2200.0:
+        width = 36.0 + xorshift32(rng) * 80.0
+        height = 70.0 + xorshift32(rng) * 150.0
+        mid.append((x, width, height, int(xorshift32(rng) * 4)))
+        x += width * (0.72 + xorshift32(rng) * 0.45)
+    return far, mid
+
+
 def _paint_city(ctx, scene: CityScene) -> None:
     pal = active_palette()
     width, height = scene.width, scene.height
-    sky = ctx
     gradient = cairo.LinearGradient(0, 0, 0, height)
-    gradient.add_color_stop_rgb(0, *pal.bg_top)
-    gradient.add_color_stop_rgb(0.72, *pal.bg_bottom)
-    gradient.add_color_stop_rgb(1, pal.bg_bottom[0] * 0.45, pal.bg_bottom[1] * 0.4, pal.bg_bottom[2] * 0.55)
-    sky.set_source(gradient)
-    sky.paint()
-    # A moon and a few fixed stars sit behind the skyline.
-    sky.set_source_rgba(0.95, 0.94, 0.88, 0.9)
-    sky.arc(width * 0.78, height * 0.16, 28, 0, math.tau)
-    sky.fill()
-    sky.set_source_rgba(*pal.bg_top, 1)
-    sky.arc(width * 0.78 + 12, height * 0.16 - 6, 24, 0, math.tau)
-    sky.fill()
-    sky.save()
-    ground = height * 0.86
-    sky.translate(width / 2.0, ground)
-    sky.scale(scene.cam_zoom, scene.cam_zoom)
-    sky.translate(-scene.cam_x, 0.0)
+    gradient.add_color_stop_rgb(0, 0.03, 0.04, 0.11)
+    gradient.add_color_stop_rgb(0.4, 0.06, 0.045, 0.13)
+    gradient.add_color_stop_rgb(0.7, 0.1, 0.06, 0.14)
+    gradient.add_color_stop_rgb(1, 0.03, 0.02, 0.04)
+    ctx.set_source(gradient)
+    ctx.paint()
+    for sx, sy, radius, warmth in scene.sky_stars:
+        tone = 0.75 + 0.2 * warmth
+        ctx.set_source_rgba(tone, tone * (0.92 + 0.05 * (1.0 - warmth)), 0.85 + 0.1 * (1.0 - warmth), 0.35 + 0.4 * radius / 2.0)
+        ctx.arc(sx, sy, radius, 0, math.tau)
+        ctx.fill()
+    ctx.set_source_rgba(0.96, 0.95, 0.9, 0.92)
+    ctx.arc(width * 0.78, height * 0.16, 26, 0, math.tau)
+    ctx.fill()
+    ctx.set_source_rgba(0.03, 0.025, 0.07, 1)
+    ctx.arc(width * 0.78 + 11, height * 0.16 - 6, 22, 0, math.tau)
+    ctx.fill()
+    ground = height * 0.78
+    _paint_layer(ctx, scene, scene.far, ground - 36.0, 0.32, 0.45, (0.035, 0.04, 0.07))
+    _paint_layer(ctx, scene, scene.mid, ground - 16.0, 0.62, 0.72, (0.055, 0.06, 0.10))
+    ctx.save()
+    ctx.translate(width / 2.0, ground)
+    far_zoom = 1.0 + (scene.cam_zoom - 1.0) * 0.35
+    ctx.scale(far_zoom, far_zoom)
+    haze = cairo.LinearGradient(0, -80, 0, 30)
+    haze.add_color_stop_rgba(0, 0.45, 0.28, 0.55, 0.0)
+    haze.add_color_stop_rgba(0.55, 0.85, 0.55, 0.32, 0.10)
+    haze.add_color_stop_rgba(1, 0.4, 0.25, 0.45, 0.0)
+    ctx.set_source(haze)
+    ctx.rectangle(-width * 2, -80, width * 4, 110)
+    ctx.fill()
+    ctx.restore()
+    ctx.save()
+    ctx.translate(width / 2.0, ground)
+    ctx.scale(scene.cam_zoom, scene.cam_zoom)
+    ctx.translate(-scene.cam_x, 0.0)
     glow = scene.street_glow()
     for building in scene.buildings:
+        _paint_building(ctx, scene, building, pal)
+    _paint_street(ctx, scene, pal, glow)
+    ctx.restore()
+
+
+def _paint_layer(ctx, scene: CityScene, blocks, ground: float, parallax: float, zoom_mix: float, color) -> None:
+    ctx.save()
+    ctx.translate(scene.width / 2.0, ground)
+    zoom = 1.0 + (scene.cam_zoom - 1.0) * zoom_mix
+    ctx.scale(zoom, zoom)
+    ctx.translate(-scene.cam_x * parallax, 0.0)
+    ctx.set_source_rgba(*color, 1.0)
+    for x, width, height, roof in blocks:
+        ctx.rectangle(x, -height, width, height)
+        ctx.fill()
+        if roof == 1 and height > 50:
+            ctx.rectangle(x + width * 0.22, -height - height * 0.18, width * 0.56, height * 0.18)
+            ctx.fill()
+        elif roof == 2:
+            ctx.move_to(x, -height)
+            ctx.line_to(x + width * 0.5, -height - 16)
+            ctx.line_to(x + width, -height)
+            ctx.fill()
+        if height > 90 and width > 40:
+            ctx.set_source_rgba(1.0, 0.78, 0.42, 0.18)
+            win_y = -height * 0.55
+            ctx.rectangle(x + width * 0.35, win_y, max(4.0, width * 0.08), 5)
+            ctx.fill()
+            ctx.set_source_rgba(*color, 1.0)
+    ctx.restore()
+
+
+def _building_rgb(building: Building) -> tuple[float, float, float]:
+    base = _NIGHT_TONES[building.tint % len(_NIGHT_TONES)]
+    lift = 0.04 * building.energy
+    return (min(1.0, base[0] + lift), min(1.0, base[1] + lift * 0.4), min(1.0, base[2] + lift))
+
+
+def _paint_building(ctx, scene: CityScene, building: Building, pal) -> None:
+    risen = scene.building_height(building)
+    if risen < 1.5:
+        return
+    body = _building_rgb(building)
+    _round_rect(ctx, building.x, -risen, building.width, risen, 3)
+    fill = cairo.LinearGradient(building.x, -risen, building.x + building.width, 0)
+    fill.add_color_stop_rgb(0, min(1, body[0] + 0.05), min(1, body[1] + 0.04), min(1, body[2] + 0.07))
+    fill.add_color_stop_rgb(1, body[0] * 0.62, body[1] * 0.62, body[2] * 0.72)
+    ctx.set_source(fill)
+    ctx.fill()
+    ctx.set_source_rgba(0, 0, 0, 0.32)
+    ctx.rectangle(building.x + building.width - min(10.0, building.width * 0.18), -risen, min(10.0, building.width * 0.18), risen)
+    ctx.fill()
+    crown = risen * 0.16
+    ctx.set_source_rgba(body[0] * 0.85, body[1] * 0.85, body[2] * 0.95, 1)
+    if building.roof == 1:
+        inset = building.width * 0.2
+        ctx.rectangle(building.x + inset, -risen - crown, building.width - 2 * inset, crown)
+        ctx.fill()
+    elif building.roof == 2:
+        ctx.move_to(building.x - 2, -risen)
+        ctx.line_to(building.x + building.width * 0.5, -risen - crown * 1.4)
+        ctx.line_to(building.x + building.width + 2, -risen)
+        ctx.fill()
+    elif building.roof == 3 or building.tower:
+        ctx.move_to(building.x + building.width * 0.28, -risen)
+        ctx.line_to(building.x + building.width * 0.5, -risen - crown * 2.1)
+        ctx.line_to(building.x + building.width * 0.72, -risen)
+        ctx.fill()
+    elif building.roof == 4:
+        ctx.rectangle(building.x + building.width * 0.12, -risen - crown * 0.45, building.width * 0.76, crown * 0.45)
+        ctx.fill()
+        ctx.rectangle(building.x + building.width * 0.28, -risen - crown, building.width * 0.44, crown * 0.55)
+        ctx.fill()
+    ctx.set_source_rgba(*pal.rim, 0.28)
+    ctx.set_line_width(1.2)
+    ctx.move_to(building.x + 2, -risen)
+    ctx.line_to(building.x + building.width - 2, -risen)
+    ctx.stroke()
+    if building.sign and risen > building.target * 0.72:
+        sign_w = building.width * (0.42 if building.sign == 1 else 0.55)
+        sign_x = building.x + (building.width - sign_w) * 0.5
+        sign_y = -risen * (0.62 if building.roof == 0 else 0.48)
+        if building.sign == 1:
+            color = (1.0, 0.55, 0.28, 0.85)
+        else:
+            color = (0.45, 0.85, 1.0, 0.8)
+        glow = cairo.LinearGradient(sign_x, sign_y, sign_x + sign_w, sign_y)
+        glow.add_color_stop_rgba(0, color[0], color[1], color[2], 0.0)
+        glow.add_color_stop_rgba(0.15, *color)
+        glow.add_color_stop_rgba(0.85, *color)
+        glow.add_color_stop_rgba(1, color[0], color[1], color[2], 0.0)
+        ctx.set_source(glow)
+        ctx.rectangle(sign_x, sign_y, sign_w, 7)
+        ctx.fill()
+    _paint_windows(ctx, scene, building, risen, pal)
+
+
+def _paint_reflections(ctx, scene: CityScene) -> None:
+    """Wet asphalt picks up the towers. Drawn after the road so the smear sits on it."""
+    for building in scene.buildings:
         risen = scene.building_height(building)
-        if risen < 1.5:
+        if risen < 12.0:
             continue
-        body = (
-            pal.ink[0] + 0.04 * building.energy,
-            pal.ink[1] + 0.03,
-            pal.ink[2] + 0.06 + 0.05 * building.energy,
-        )
-        _round_rect(sky, building.x, -risen, building.width, risen, 5)
-        fill = cairo.LinearGradient(building.x, -risen, building.x + building.width, 0)
-        fill.add_color_stop_rgb(0, min(1, body[0] + 0.05), min(1, body[1] + 0.04), min(1, body[2] + 0.08))
-        fill.add_color_stop_rgb(1, body[0] * 0.72, body[1] * 0.72, body[2] * 0.8)
-        sky.set_source(fill)
-        sky.fill()
-        # The side face keeps the block from looking like a flat poster.
-        sky.set_source_rgba(0, 0, 0, 0.28)
-        sky.rectangle(building.x + building.width - 8, -risen, 8, risen)
-        sky.fill()
-        sky.set_source_rgba(*pal.rim, 0.35)
-        sky.set_line_width(1.4)
-        sky.move_to(building.x + 2, -risen)
-        sky.line_to(building.x + building.width - 2, -risen)
-        sky.stroke()
-        if building.tower and risen > building.target * 0.92:
-            sky.set_source_rgba(*pal.accent2, 0.9)
-            mast_x = building.x + building.width * 0.55
-            sky.set_line_width(2)
-            sky.move_to(mast_x, -risen)
-            sky.line_to(mast_x, -risen - 28)
-            sky.stroke()
-            sky.move_to(mast_x - 4, -risen - 28)
-            sky.line_to(mast_x + 4, -risen - 28)
-            sky.stroke()
-        _paint_windows(sky, scene, building, risen, pal)
-    _paint_street(sky, scene, pal, glow)
-    sky.restore()
+        smear = min(78.0, risen * 0.28)
+        cols = max(2, building.cols)
+        for col in range(cols):
+            x = building.x + building.width * (col + 0.5) / cols - 1.4
+            grad = cairo.LinearGradient(0, 8, 0, 8 + smear)
+            grad.add_color_stop_rgba(0, 1.0, 0.78, 0.45, 0.22)
+            grad.add_color_stop_rgba(1, 1.0, 0.7, 0.4, 0.0)
+            ctx.set_source(grad)
+            ctx.rectangle(x, 12, 2.8, smear)
+            ctx.fill()
+        if building.sign:
+            color = (1.0, 0.45, 0.22) if building.sign == 1 else (0.4, 0.78, 1.0)
+            ctx.set_source_rgba(*color, 0.2)
+            ctx.rectangle(building.x + building.width * 0.22, 16, building.width * 0.56, 3.5)
+            ctx.fill()
 
 
 def _paint_street(ctx, scene: CityScene, pal, glow: float) -> None:
@@ -369,6 +529,7 @@ def _paint_street(ctx, scene: CityScene, pal, glow: float) -> None:
     ctx.set_source(wash)
     ctx.rectangle(left - 280, 0, span + 560, 36)
     ctx.fill()
+    _paint_reflections(ctx, scene)
     if pulse > 0.04:
         ctx.set_source_rgba(1.0, 0.9, 0.7, 0.22 * pulse)
         ctx.rectangle(left - 280, 2, span + 560, 5)
@@ -825,6 +986,8 @@ class Star:
     phase: float
     midi: int
     phrase: int
+    scale: float = 1.0
+    warmth: float = 0.5
 
 
 @dataclass
@@ -891,7 +1054,7 @@ def _build_stars(width: int, height: int, analysis: Analysis, seed: int) -> Star
             gap = tone.time - bucket[-1].time
             previous = section_at(analysis.sections, bucket[-1].time).label
             # Short groups read as constellations. A whole verse on one line does not.
-            if gap > 1.15 or (section != previous and gap > 0.45) or len(bucket) >= 5:
+            if gap > 1.15 or (section != previous and gap > 0.45) or len(bucket) >= 6:
                 phrases.append(bucket)
                 bucket = []
         bucket.append(tone)
@@ -899,8 +1062,13 @@ def _build_stars(width: int, height: int, analysis: Analysis, seed: int) -> Star
         phrases.append(bucket)
     stars, links = _layout_constellations(phrases, float(width), float(height), rng)
     dust = []
-    for _ in range(48):
-        dust.append((xorshift32(rng) * width, xorshift32(rng) * height * 0.85, 0.6 + xorshift32(rng) * 1.4))
+    occupied = [(star.x, star.y) for star in stars]
+    for _ in range(260):
+        x = 24.0 + xorshift32(rng) * (width - 48.0)
+        y = 20.0 + xorshift32(rng) * (height * 0.92)
+        if any(math.hypot(x - sx, y - sy) < 26.0 for sx, sy in occupied):
+            continue
+        dust.append((x, y, 0.35 + xorshift32(rng) * 1.15, xorshift32(rng), xorshift32(rng) * math.tau))
     scene = StarScene(
         form="stars",
         palette_name="stars",
@@ -929,140 +1097,286 @@ def _build_stars(width: int, height: int, analysis: Analysis, seed: int) -> Star
 
 
 def _layout_constellations(phrases: list[list[Tone]], width: float, height: float, rng: list[int]):
-    """One separated patch per phrase. Stars run left to right inside it, so lines cannot cross."""
-    count = max(1, len(phrases))
-    longest = max(len(phrase) for phrase in phrases)
-    margin_x = width * 0.04
-    margin_y = height * 0.05
-    usable_w = width - 2.0 * margin_x
-    usable_h = height * 0.88 - margin_y
-    min_gap = 100.0
-    min_step = 84.0
-    chosen: tuple | None = None
-    for cols in range(1, count + 1):
-        rows = math.ceil(count / cols)
-        cell_w = usable_w / cols
-        cell_h = usable_h / rows
-        inner_w = cell_w - min_gap
-        inner_h = cell_h - min_gap
-        step = inner_w / max(1, longest - 1)
-        if longest == 1:
-            step = min_step
-        if inner_w < min_step or inner_h < 48.0 or step < min_step:
-            continue
-        rank = (step, inner_h, -rows)
-        if chosen is None or rank > chosen[0]:
-            chosen = (rank, cols, rows, cell_w, cell_h)
-    if chosen is None:
-        cols = max(1, min(count, 4))
-        rows = math.ceil(count / cols)
-        cell_w = usable_w / cols
-        cell_h = usable_h / rows
-        min_gap = 64.0
-        min_step = 64.0
-    else:
-        _, cols, rows, cell_w, cell_h = chosen
+    """Each phrase is a small hooked figure in its own part of the sky. Lines stay a simple chain."""
+    pending = []
+    for index, phrase in enumerate(phrases):
+        local = _organic_points(len(phrase), rng)
+        radius = max((math.hypot(x, y) for x, y in local), default=0.0)
+        pending.append((index, phrase, local, radius))
+    pending.sort(key=lambda item: -item[3])
+    placed: list[tuple[float, float, float]] = []
+    origins: dict[int, tuple[float, float]] = {}
+    for index, phrase, local, radius in pending:
+        origin = _seat_figure(radius, placed, width, height, rng)
+        placed.append((origin[0], origin[1], radius))
+        origins[index] = origin
     stars: list[Star] = []
     links: list[tuple[int, int]] = []
     for index, phrase in enumerate(phrases):
-        col = index % cols
-        row = index // cols
-        left = margin_x + col * cell_w + min_gap * 0.5
-        right = margin_x + (col + 1) * cell_w - min_gap * 0.5
-        top = margin_y + row * cell_h + min_gap * 0.5
-        bottom = margin_y + (row + 1) * cell_h - min_gap * 0.5
-        if right - left < 36:
-            right = left + 36
-        if bottom - top < 28:
-            bottom = top + 28
+        local = next(item[2] for item in pending if item[0] == index)
+        ox, oy = origins[index]
+        peak = max(tone.midi for tone in phrase)
         first = len(stars)
-        steps = len(phrase)
-        mid_y = (top + bottom) / 2.0
-        amp = min(36.0, (bottom - top) * 0.38)
-        if steps <= 1:
-            slack_x = (right - left) / 2.0
-            slack_y = (bottom - top) / 2.0
-            shift_x = math.sin(index * 1.7) * min(16.0, slack_x)
-            shift_y = math.cos(index * 1.3) * min(12.0, slack_y)
-            stars.append(Star(phrase[0].time, (left + right) / 2.0 + shift_x, mid_y + shift_y, xorshift32(rng) * math.tau, phrase[0].midi, index))
-            continue
-        fit = (right - left) / (steps - 1)
-        step = min(120.0, max(min_step, fit))
-        if step > fit:
-            step = fit
-        span = step * (steps - 1)
-        # Shift only into leftover space, so neighboring figures cannot be pushed together.
-        slack_x = max(0.0, (right - left) - span) / 2.0
-        slack_y = max(0.0, (bottom - top) / 2.0 - amp)
-        shift_x = math.sin(index * 1.7) * min(16.0, slack_x)
-        shift_y = math.cos(index * 1.3) * min(12.0, slack_y)
-        x0 = (left + right) / 2.0 - span / 2.0 + shift_x
-        mid_y += shift_y
         for place, tone in enumerate(phrase):
-            x = x0 + place * step
-            y = mid_y + math.sin(place * 1.15 + index * 0.85) * amp
-            stars.append(Star(tone.time, x, y, xorshift32(rng) * math.tau, tone.midi, index))
+            x, y = local[place]
+            scale = 0.48 + xorshift32(rng) * 0.72
+            if tone.midi == peak:
+                scale += 0.28
+            scale = min(1.45, scale)
+            warmth = xorshift32(rng)
+            stars.append(
+                Star(
+                    tone.time,
+                    ox + x,
+                    oy + y,
+                    xorshift32(rng) * math.tau,
+                    tone.midi,
+                    index,
+                    scale,
+                    warmth,
+                )
+            )
             if place:
                 links.append((first + place - 1, first + place))
     return stars, links
 
 
-def _paint_star_glyph(ctx, x: float, y: float, level: float, color, phase: float, time: float, scale: float = 1.0) -> None:
-    """A diffraction cross. The core stays smaller than the spikes so bloom cannot turn it into a ball."""
-    twinkle = 0.82 + 0.18 * math.sin(time * 2.4 + phase)
-    spike = (30.0 + 12.0 * level) * twinkle * scale
-    tint = (
-        0.82 + 0.18 * color[0],
-        0.8 + 0.18 * color[1],
-        0.74 + 0.18 * color[2],
+def _seat_figure(radius: float, placed: list[tuple[float, float, float]], width: float, height: float, rng: list[int]) -> tuple[float, float]:
+    margin_x = 90.0 + radius
+    margin_y = 70.0 + radius
+    sky_bottom = height * 0.84
+    best = (width * 0.5, height * 0.35)
+    best_clear = -1.0
+    for attempt in range(48):
+        cx = margin_x + xorshift32(rng) * max(1.0, width - 2.0 * margin_x)
+        cy = margin_y + xorshift32(rng) * max(1.0, sky_bottom - 2.0 * margin_y)
+        clear = _clearance(cx, cy, radius, placed)
+        if clear >= 62.0:
+            return cx, cy
+        if clear > best_clear:
+            best, best_clear = (cx, cy), clear
+    # A loose scatter, still not a row: walk a jittered lattice and keep the roomiest cell.
+    cols = max(2, int(width // 340))
+    rows = max(2, int(sky_bottom // 240))
+    for row in range(rows):
+        for col in range(cols):
+            jx = (xorshift32(rng) - 0.5) * 80.0
+            jy = (xorshift32(rng) - 0.5) * 50.0
+            cx = width * (col + 0.5) / cols + jx
+            cy = sky_bottom * (row + 0.45) / rows + jy
+            cx = min(width - 60.0, max(60.0, cx))
+            cy = min(sky_bottom - 40.0, max(50.0, cy))
+            clear = _clearance(cx, cy, radius, placed)
+            if clear > best_clear:
+                best, best_clear = (cx, cy), clear
+    return best
+
+
+def _clearance(cx: float, cy: float, radius: float, placed: list[tuple[float, float, float]]) -> float:
+    if not placed:
+        return 1e6
+    return min(math.hypot(cx - ox, cy - oy) - radius - other for ox, oy, other in placed)
+
+
+def _organic_points(count: int, rng: list[int]) -> list[tuple[float, float]]:
+    if count <= 1:
+        return [(0.0, 0.0)]
+    for _ in range(10):
+        style = int(xorshift32(rng) * 3)
+        if style == 0:
+            sweep = 1.15 + xorshift32(rng) * 1.5
+            points = _arc_points(count, sweep, rng)
+        elif style == 1:
+            sweep = 2.7 + xorshift32(rng) * 1.5
+            points = _arc_points(count, sweep, rng)
+        else:
+            points = _walk_points(count, rng)
+            if points is None:
+                continue
+        points = _rotate_points(points, xorshift32(rng) * math.tau)
+        if _figure_ok(points) and _bent(points):
+            return _center_points(points)
+    hooked = _arc_points(count, 2.6, rng)
+    return _center_points(_rotate_points(hooked, xorshift32(rng) * math.tau))
+
+
+def _arc_points(count: int, sweep: float, rng: list[int]) -> list[tuple[float, float]]:
+    step = 78.0
+    delta = sweep / max(1, count - 1)
+    radius = step / max(0.35, 2.0 * math.sin(delta / 2.0))
+    start = xorshift32(rng) * math.tau
+    return [(math.cos(start + i * delta) * radius, math.sin(start + i * delta) * radius) for i in range(count)]
+
+
+def _walk_points(count: int, rng: list[int]) -> list[tuple[float, float]] | None:
+    points = [(0.0, 0.0)]
+    heading = xorshift32(rng) * math.tau
+    for _ in range(1, count):
+        found = None
+        for _try in range(28):
+            turn = (xorshift32(rng) - 0.5) * 2.6
+            if xorshift32(rng) < 0.3:
+                turn += 0.9 if turn >= 0.0 else -0.9
+            heading_next = heading + turn
+            step = 74.0 + xorshift32(rng) * 24.0
+            nxt = (
+                points[-1][0] + math.cos(heading_next) * step,
+                points[-1][1] + math.sin(heading_next) * step,
+            )
+            trial = points + [nxt]
+            if _figure_ok(trial):
+                found = (nxt, heading_next)
+                break
+        if found is None:
+            return None
+        points.append(found[0])
+        heading = found[1]
+    return points
+
+
+def _rotate_points(points: list[tuple[float, float]], angle: float) -> list[tuple[float, float]]:
+    cos = math.cos(angle)
+    sin = math.sin(angle)
+    return [(x * cos - y * sin, x * sin + y * cos) for x, y in points]
+
+
+def _center_points(points: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    cx = sum(x for x, _ in points) / len(points)
+    cy = sum(y for _, y in points) / len(points)
+    return [(x - cx, y - cy) for x, y in points]
+
+
+def _bent(points: list[tuple[float, float]]) -> bool:
+    """A chain of three or more should bend, so it does not read as a ruled line."""
+    if len(points) < 3:
+        return True
+    centered = _center_points(points)
+    xs = [point[0] for point in centered]
+    ys = [point[1] for point in centered]
+    span_x = max(xs) - min(xs)
+    span_y = max(ys) - min(ys)
+    short = max(1.0, min(span_x, span_y))
+    return max(span_x, span_y) / short <= 2.5
+
+
+def _figure_ok(points: list[tuple[float, float]]) -> bool:
+    for i, a in enumerate(points):
+        for b in points[i + 1 :]:
+            if math.hypot(a[0] - b[0], a[1] - b[1]) < 70.0:
+                return False
+    if len(points) < 4:
+        return True
+    for i in range(len(points) - 1):
+        for j in range(i + 2, len(points) - 1):
+            if _pair_cross(points[i], points[i + 1], points[j], points[j + 1]):
+                return False
+    return True
+
+
+def _pair_cross(a, b, c, d) -> bool:
+    def orient(p, q, r) -> float:
+        return (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0])
+
+    return orient(a, b, c) * orient(a, b, d) < 0 and orient(c, d, a) * orient(c, d, b) < 0
+
+
+def _star_tint(warmth: float) -> tuple[float, float, float]:
+    return (
+        0.76 + 0.24 * warmth,
+        0.84 + 0.08 * (1.0 - abs(warmth - 0.35)),
+        0.98 - 0.26 * warmth,
     )
+
+
+def _paint_star_glyph(ctx, x: float, y: float, level: float, warmth: float, phase: float, time: float, scale: float = 1.0) -> None:
+    """Soft core, with short spikes that fade out. Size and warmth come from the star."""
+    twinkle = 0.86 + 0.14 * math.sin(time * 2.1 + phase)
+    tint = _star_tint(warmth)
+    spike = (6.0 + 8.0 * level) * (0.65 + 0.55 * scale) * twinkle
+    core = (2.2 + 4.8 * scale) * (0.75 + 0.25 * level)
+    glow = cairo.RadialGradient(x, y, 0.2, x, y, core * 2.4)
+    glow.add_color_stop_rgba(0, 1, 1, 1, 0.9 * level * twinkle)
+    glow.add_color_stop_rgba(0.28, tint[0], tint[1], tint[2], 0.45 * level)
+    glow.add_color_stop_rgba(1, tint[0], tint[1], tint[2], 0.0)
+    ctx.set_source(glow)
+    ctx.arc(x, y, core * 2.4, 0, math.tau)
+    ctx.fill()
     ctx.set_line_cap(cairo.LINE_CAP_ROUND)
-    ctx.set_line_width(4.2 * scale)
-    ctx.set_source_rgba(*tint, min(1.0, 0.95 * level * twinkle))
-    ctx.move_to(x - spike, y)
-    ctx.line_to(x + spike, y)
-    ctx.stroke()
-    ctx.move_to(x, y - spike * 1.08)
-    ctx.line_to(x, y + spike * 1.02)
-    ctx.stroke()
-    diagonal = spike * 0.38
-    ctx.set_source_rgba(1, 0.98, 0.94, 0.7 * level * twinkle)
-    ctx.set_line_width(1.8 * scale)
-    ctx.move_to(x - diagonal, y - diagonal)
-    ctx.line_to(x + diagonal, y + diagonal)
-    ctx.stroke()
-    ctx.move_to(x - diagonal, y + diagonal)
-    ctx.line_to(x + diagonal, y - diagonal)
-    ctx.stroke()
-    ctx.set_source_rgba(1, 1, 1, min(1.0, level))
-    ctx.arc(x, y, 1.7 * scale, 0, math.tau)
+    angles = (0.0, math.pi / 2.0, math.pi, 3.0 * math.pi / 2.0)
+    for index, angle in enumerate(angles):
+        length = spike * (1.15 if index % 2 else 0.82)
+        _fading_spike(ctx, x, y, angle, length, 1.15 * (0.7 + 0.4 * scale), tint, 0.75 * level * twinkle)
+    diag = spike * 0.38
+    for angle in (math.pi / 4.0, 3.0 * math.pi / 4.0, 5.0 * math.pi / 4.0, 7.0 * math.pi / 4.0):
+        _fading_spike(ctx, x, y, angle, diag, 0.8, (1.0, 0.98, 0.95), 0.35 * level * twinkle)
+    ctx.set_source_rgba(1, 1, 1, min(1.0, 0.95 * level))
+    ctx.arc(x, y, 1.15 * (0.6 + scale * 0.5), 0, math.tau)
     ctx.fill()
 
 
+def _fading_spike(ctx, x: float, y: float, angle: float, length: float, width: float, color, alpha: float) -> None:
+    if length < 1.0 or alpha <= 0.0:
+        return
+    x2 = x + math.cos(angle) * length
+    y2 = y + math.sin(angle) * length
+    grad = cairo.LinearGradient(x, y, x2, y2)
+    grad.add_color_stop_rgba(0.0, color[0], color[1], color[2], alpha)
+    grad.add_color_stop_rgba(0.4, color[0], color[1], color[2], alpha * 0.35)
+    grad.add_color_stop_rgba(1.0, color[0], color[1], color[2], 0.0)
+    ctx.set_source(grad)
+    ctx.set_line_width(width)
+    ctx.move_to(x, y)
+    ctx.line_to(x2, y2)
+    ctx.stroke()
+
+
 def _paint_stars(ctx, scene: StarScene) -> None:
-    pal = active_palette()
     width, height = scene.width, scene.height
     gradient = cairo.LinearGradient(0, 0, 0, height)
-    gradient.add_color_stop_rgb(0, *pal.bg_top)
-    gradient.add_color_stop_rgb(0.55, 0.03, 0.02, 0.07)
-    gradient.add_color_stop_rgb(1, *pal.bg_bottom)
+    gradient.add_color_stop_rgb(0, 0.045, 0.055, 0.16)
+    gradient.add_color_stop_rgb(0.34, 0.09, 0.055, 0.18)
+    gradient.add_color_stop_rgb(0.66, 0.11, 0.07, 0.17)
+    gradient.add_color_stop_rgb(1, 0.05, 0.04, 0.10)
     ctx.set_source(gradient)
     ctx.paint()
-    # A soft band, so the sky has depth before any note arrives.
-    band = cairo.LinearGradient(0, height * 0.35, 0, height * 0.62)
-    band.add_color_stop_rgba(0, *pal.accent2, 0)
-    band.add_color_stop_rgba(0.5, *pal.accent2, 0.05)
-    band.add_color_stop_rgba(1, *pal.accent, 0)
+    ctx.save()
+    ctx.translate(width * 0.58, height * 0.4)
+    ctx.rotate(-0.32)
+    band = cairo.LinearGradient(0, -120, 0, 120)
+    band.add_color_stop_rgba(0, 0.28, 0.22, 0.5, 0.0)
+    band.add_color_stop_rgba(0.35, 0.45, 0.34, 0.72, 0.07)
+    band.add_color_stop_rgba(0.5, 0.82, 0.7, 0.9, 0.16)
+    band.add_color_stop_rgba(0.68, 0.4, 0.3, 0.62, 0.07)
+    band.add_color_stop_rgba(1, 0.18, 0.14, 0.32, 0.0)
     ctx.set_source(band)
-    ctx.paint()
+    ctx.rectangle(-width, -130, width * 2.2, 260)
+    ctx.fill()
+    ctx.restore()
+    for ox, oy, radius, tint in (
+        (width * 0.28, height * 0.32, 280, (0.45, 0.32, 0.7)),
+        (width * 0.72, height * 0.48, 340, (0.25, 0.38, 0.62)),
+        (width * 0.5, height * 0.22, 180, (0.7, 0.5, 0.4)),
+    ):
+        blob = cairo.RadialGradient(ox, oy, 10, ox, oy, radius)
+        blob.add_color_stop_rgba(0, tint[0], tint[1], tint[2], 0.11)
+        blob.add_color_stop_rgba(1, tint[0], tint[1], tint[2], 0.0)
+        ctx.set_source(blob)
+        ctx.arc(ox, oy, radius, 0, math.tau)
+        ctx.fill()
     ctx.save()
     ctx.translate(width / 2.0, height / 2.0)
     ctx.scale(scene.cam_zoom, scene.cam_zoom)
     ctx.translate(-width / 2.0 + scene.cam_x, -height / 2.0 + scene.cam_y)
-    for x, y, radius in scene.dust:
-        ctx.set_source_rgba(0.85, 0.88, 0.95, 0.18 + 0.08 * math.sin(scene.time * 1.2 + radius))
-        ctx.arc(x, y, 1.1, 0, math.tau)
+    for x, y, scale, warmth, phase in scene.dust:
+        twinkle = 0.55 + 0.45 * math.sin(scene.time * 1.4 + phase)
+        tint = _star_tint(warmth)
+        alpha = (0.12 + 0.28 * min(1.0, scale)) * twinkle
+        ctx.set_source_rgba(tint[0], tint[1], tint[2], alpha)
+        ctx.arc(x, y, 0.7 + scale * 0.7, 0, math.tau)
         ctx.fill()
+        if scale > 1.05:
+            _fading_spike(ctx, x, y, phase, 4.5 + scale * 2.0, 0.7, tint, alpha * 0.8)
+            _fading_spike(ctx, x, y, phase + math.pi / 2.0, 5.5 + scale * 2.0, 0.7, tint, alpha * 0.7)
     ctx.set_line_cap(cairo.LINE_CAP_ROUND)
     for left, right in scene.links:
         a = scene.stars[left]
@@ -1071,14 +1385,14 @@ def _paint_stars(ctx, scene: StarScene) -> None:
         age = scene.time - born
         if age < 0.0:
             continue
-        # Fresh phrases stay drawn. Older ones recede so the sky does not become one web.
         appear = _smooth(min(1.0, age / 0.45))
-        if age < 4.5:
-            alpha = appear * 0.7
+        if age < 5.0:
+            alpha = appear * 0.42
         else:
-            alpha = max(0.14, 0.7 * _smooth(1.0 - (age - 4.5) / 6.0))
-        ctx.set_source_rgba(0.82, 0.86, 0.94, alpha)
-        ctx.set_line_width(1.35)
+            alpha = max(0.1, 0.42 * _smooth(1.0 - (age - 5.0) / 7.0))
+        tint = _star_tint((a.warmth + b.warmth) * 0.5)
+        ctx.set_source_rgba(tint[0], tint[1], tint[2], alpha)
+        ctx.set_line_width(1.05)
         ctx.move_to(a.x, a.y)
         ctx.line_to(b.x, b.y)
         ctx.stroke()
@@ -1086,7 +1400,7 @@ def _paint_stars(ctx, scene: StarScene) -> None:
         level = scene.brightness(star)
         if level <= 0.01:
             continue
-        _paint_star_glyph(ctx, star.x, star.y, level, NOTE_COLORS[star.midi % 12], star.phase, scene.time)
+        _paint_star_glyph(ctx, star.x, star.y, level, star.warmth, star.phase, scene.time, star.scale)
     ctx.restore()
 
 
