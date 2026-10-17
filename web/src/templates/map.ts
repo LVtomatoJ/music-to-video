@@ -1,6 +1,6 @@
 import type { MusicData } from "../music";
 import { sectionAt } from "../music";
-import { clamp, damp, roundRect, sampleCurve, smoothstep } from "../math";
+import { clamp, roundRect, sampleCurve, smoothstep } from "../math";
 import { defineTemplate, type ParamSpec } from "../template";
 import { BAKE_DT, TAU, as2d, frameCount, rgb, rgba } from "./shared";
 import { pointOn, solveMap, type Obstacle, type Segment } from "./map-solve";
@@ -258,9 +258,20 @@ function cameraTarget(
   const fitX = Math.max(maxX - minX, 160);
   const fitY = Math.max(maxY - minY, 120);
   const zoom = clamp(Math.min((width * 0.64) / fitX, (height * 0.64) / fitY), 0.46, 0.54);
-  const cx = (minX + maxX) / 2;
-  const cy = (minY + maxY) / 2;
-  return [Number.isFinite(cx) ? cx : ball[0], Number.isFinite(cy) ? cy : ball[1], Number.isFinite(zoom) ? zoom : 0.7];
+  const ahead = (0.14 * Math.min(width, height)) / zoom;
+  const lookX = ball[0] + (vx / speed) * ahead;
+  const lookY = ball[1] + (vy / speed) * ahead;
+  return [Number.isFinite(lookX) ? lookX : ball[0], Number.isFinite(lookY) ? lookY : ball[1], Number.isFinite(zoom) ? zoom : 0.7];
+}
+
+/** Exact step of a critically damped spring. No overshoot, so the camera does not ring on a turn. */
+function springStep(position: number, velocity: number, target: number, dt: number, omega: number): [number, number] {
+  const offset = position - target;
+  const carry = velocity + omega * offset;
+  const decay = Math.exp(-omega * dt);
+  const next = target + (offset + carry * dt) * decay;
+  const nextVelocity = (carry - omega * (offset + carry * dt)) * decay;
+  return [Number.isFinite(next) ? next : target, Number.isFinite(nextVelocity) ? nextVelocity : 0];
 }
 
 function bakeCamera(
@@ -278,6 +289,9 @@ function bakeCamera(
   let cx = 0;
   let cy = 0;
   let cz = 1;
+  let vx = 0;
+  let vy = 0;
+  let vz = 0;
   for (let frame = 0; frame < frames; frame++) {
     const time = frame * BAKE_DT;
     const energy = sectionAt(music, time).energy;
@@ -289,10 +303,13 @@ function bakeCamera(
       cx = nextX;
       cy = nextY;
       cz = nextZ;
+      vx = 0;
+      vy = 0;
+      vz = 0;
     } else {
-      cx = damp(cx, nextX, BAKE_DT, 3.6);
-      cy = damp(cy, nextY, BAKE_DT, 3.6);
-      cz = damp(cz, nextZ, BAKE_DT, 2);
+      [cx, vx] = springStep(cx, vx, nextX, BAKE_DT, 16);
+      [cy, vy] = springStep(cy, vy, nextY, BAKE_DT, 16);
+      [cz, vz] = springStep(cz, vz, nextZ, BAKE_DT, 3);
     }
     x[frame] = cx;
     y[frame] = cy;
@@ -323,20 +340,23 @@ export function framedView(state: MapState, time: number): {
   zoom = clamp(zoom, 0.44, 0.56);
   let ballX = (worldX - camX) * zoom + state.width / 2;
   let ballY = (worldY - camY) * zoom + state.height / 2;
-  const margin = 40;
-  if (ballX < margin) {
-    camX -= (margin - ballX) / zoom;
-    ballX = margin;
-  } else if (ballX > state.width - margin) {
-    camX += (ballX - (state.width - margin)) / zoom;
-    ballX = state.width - margin;
+  const minX = state.width * 0.2;
+  const maxX = state.width * 0.8;
+  const minY = state.height * 0.2;
+  const maxY = state.height * 0.8;
+  if (ballX < minX) {
+    camX -= (minX - ballX) / zoom;
+    ballX = minX;
+  } else if (ballX > maxX) {
+    camX += (ballX - maxX) / zoom;
+    ballX = maxX;
   }
-  if (ballY < margin) {
-    camY -= (margin - ballY) / zoom;
-    ballY = margin;
-  } else if (ballY > state.height - margin) {
-    camY += (ballY - (state.height - margin)) / zoom;
-    ballY = state.height - margin;
+  if (ballY < minY) {
+    camY -= (minY - ballY) / zoom;
+    ballY = minY;
+  } else if (ballY > maxY) {
+    camY += (ballY - maxY) / zoom;
+    ballY = maxY;
   }
   return { camX, camY, zoom, ballX, ballY };
 }
