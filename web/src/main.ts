@@ -3,7 +3,9 @@ import { hashString, mixSeed, mulberry32, clamp } from "./math";
 import { demoMusic, decodeAndAnalyze, type MusicData, type SectionLabel } from "./music";
 import { applyPost } from "./post";
 import { defaultParams, defaultPost, type Canvas2DContext, type ParamValues } from "./template";
+import { auditTraffic } from "./traffic";
 import { templates, type RunnableTemplate } from "./templates";
+import { auditMap } from "./templates/map";
 
 const VIEW_W = 1600;
 const VIEW_H = 900;
@@ -431,6 +433,11 @@ window.__m2v = {
     if (!result) throw new Error("导出没有返回文件");
     return result;
   },
+  audit() {
+    if (current.meta.id === "map") return auditMap(plan as Parameters<typeof auditMap>[0]);
+    if (current.meta.id === "city") return auditTraffic((plan as { cars: Parameters<typeof auditTraffic>[0] }).cars);
+    return null;
+  },
 };
 
 declare global {
@@ -447,6 +454,7 @@ declare global {
       play: () => void;
       pause: () => void;
       exportSeconds: (seconds: number) => Promise<{ bytes: number; head: string }>;
+      audit: () => unknown;
     };
   }
 }

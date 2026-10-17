@@ -1,6 +1,7 @@
 import type { MusicData, Section } from "../music";
 import { clamp, damp, interp, roundRect, sampleCurve, smoothstep, timesPulse } from "../math";
 import { defineTemplate, type ParamSpec } from "../template";
+import { bakeTraffic, type Car } from "../traffic";
 import { BAKE_DT, as2d, frameCount, rgb, rgba } from "./shared";
 
 interface Building {
@@ -46,6 +47,7 @@ interface CityState {
   sections: Section[];
   camX: Float32Array;
   camZ: Float32Array;
+  cars: Car[];
 }
 
 const NIGHT = [
@@ -212,6 +214,7 @@ function buildCity(width: number, height: number, music: MusicData, rng: () => n
     sections: music.sections,
     camX: camera.x,
     camZ: camera.z,
+    cars: bakeTraffic(width, music.duration, beats),
   };
 }
 
@@ -326,16 +329,6 @@ function buildingHeight(building: Building, time: number): number {
   return building.target * smoothstep(u);
 }
 
-function energyArea(sections: Section[], time: number): number {
-  let area = 0;
-  for (const section of sections) {
-    const start = Math.max(0, section.start);
-    const end = Math.min(time, section.end);
-    if (end > start) area += (end - start) * section.energy;
-  }
-  return area;
-}
-
 function paintCity(
   ctx: CanvasRenderingContext2D,
   state: CityState,
@@ -395,7 +388,7 @@ function paintCity(
     paintBuilding(ctx, state, state.buildings[index], index, time, glow);
   }
   ctx.restore();
-  paintStreet(ctx, state, time, glow, pulse, camX, zoom, ground);
+  paintStreet(ctx, state, time, pulse, camX, zoom, ground);
   view.post.glow = 0.72 + 0.45 * Math.max(pulse, glow * 0.65);
   view.post.grain = 0.85;
   view.post.vignette = 0.95;
@@ -554,7 +547,6 @@ function paintStreet(
   ctx: CanvasRenderingContext2D,
   state: CityState,
   time: number,
-  glow: number,
   pulse: number,
   camX: number,
   zoom: number,
@@ -580,11 +572,7 @@ function paintStreet(
   ctx.lineTo(width, ground + (height - ground) * 0.42);
   ctx.stroke();
   ctx.setLineDash([]);
-  const boost = energyArea(state.sections, time);
-  const lanes = [0.22, 0.48, 0.72];
-  lanes.forEach((place, index) => {
-    paintLane(ctx, state, time, boost, ground + (height - ground) * place, index === 1 ? -1 : 1, index * 0.37, pulse, glow);
-  });
+  for (const car of state.cars) paintCar(ctx, state, car, time, ground, pulse);
 }
 
 function paintReflections(
@@ -642,28 +630,24 @@ function paintReflections(
   ctx.restore();
 }
 
-function paintLane(
+function paintCar(
   ctx: CanvasRenderingContext2D,
   state: CityState,
+  car: Car,
   time: number,
-  boost: number,
-  lane: number,
-  direction: number,
-  phase: number,
+  ground: number,
   pulse: number,
-  glow: number,
 ): void {
-  const width = state.width;
-  const length = 260 + 90 * pulse;
-  const thick = 7 + 2 * pulse;
-  const speed = 190 + (direction < 0 ? 36 : 0);
-  const span = width + length + 80;
-  const travel = (time * speed * (1 + 0.55 * glow) + boost * 22 + phase * span) % span;
-  const nose = direction > 0 ? travel - length : width - (travel - length);
-  const tail = direction > 0 ? nose - length : nose;
-  const x0 = Math.min(tail, nose);
-  const grad = ctx.createLinearGradient(direction > 0 ? x0 : x0 + length, lane, direction > 0 ? x0 + length : x0, lane);
-  if (direction > 0) {
+  const nose = sampleCurve(car.x, BAKE_DT, time);
+  const length = 248;
+  const tail = nose - car.dir * length;
+  const x0 = Math.min(nose, tail);
+  const x1 = Math.max(nose, tail);
+  if (x1 < -8 || x0 > state.width + 8) return;
+  const lane = ground + (state.height - ground) * car.lane;
+  const thick = 7 + 1.4 * pulse;
+  const grad = ctx.createLinearGradient(car.dir > 0 ? x0 : x1, lane, car.dir > 0 ? x1 : x0, lane);
+  if (car.dir > 0) {
     grad.addColorStop(0, rgba(1, 0.28, 0.12, 0));
     grad.addColorStop(0.35, rgba(1, 0.45, 0.18, 0.75));
     grad.addColorStop(0.78, rgba(1, 0.86, 0.55, 0.95));
@@ -675,14 +659,13 @@ function paintLane(
     grad.addColorStop(1, rgba(0.2, 0.35, 0.9, 0));
   }
   ctx.fillStyle = grad;
-  ctx.fillRect(x0, lane - thick / 2, length, thick);
-  const headX = direction > 0 ? x0 + length : x0;
-  const head = ctx.createRadialGradient(headX, lane, 1, headX, lane, 16);
+  ctx.fillRect(x0, lane - thick / 2, x1 - x0, thick);
+  const head = ctx.createRadialGradient(nose, lane, 1, nose, lane, 14 + 4 * pulse);
   head.addColorStop(0, rgba(1, 1, 1, 1));
   head.addColorStop(0.45, rgba(1, 0.95, 0.85, 0.85));
   head.addColorStop(1, rgba(1, 0.8, 0.4, 0));
   ctx.fillStyle = head;
   ctx.beginPath();
-  ctx.arc(headX, lane, 16, 0, Math.PI * 2);
+  ctx.arc(nose, lane, 14 + 4 * pulse, 0, Math.PI * 2);
   ctx.fill();
 }

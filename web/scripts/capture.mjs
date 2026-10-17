@@ -99,7 +99,9 @@ try {
       }, id, time);
       const dataUrl = await page.evaluate(() => document.querySelector("#view").toDataURL("image/png"));
       const clock = await page.evaluate(() => document.querySelector("#clock")?.textContent ?? "");
+      const audit = await page.evaluate(() => window.__m2v.audit());
       console.log("clock", name, clock);
+      if (name === Object.keys(times)[0]) console.log("audit", id, JSON.stringify(audit));
       const file = path.join(outDir, `${id}-${name}.png`);
       fs.writeFileSync(file, Buffer.from(dataUrl.split(",")[1], "base64"));
       console.log("wrote", file);
