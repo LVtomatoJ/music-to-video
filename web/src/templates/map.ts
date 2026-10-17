@@ -91,7 +91,12 @@ export const mapTemplate = defineTemplate<MapState, typeof mapParams>({
 });
 
 function buildMap(width: number, height: number, music: MusicData, seed: number, skinName: string): MapState {
-  const solved = solveMap(music, seed, skinName);
+  let solved: ReturnType<typeof solveMap>;
+  try {
+    solved = solveMap(music, seed, skinName);
+  } catch {
+    solved = solveMap({ ...music, beats: [], duration: Math.max(music.duration, 0.5) }, seed, skinName);
+  }
   const skin = SKINS[skinName] ?? SKINS.neon;
   const beats = music.beats.length ? music.beats.slice() : [0];
   const camera = bakeCamera(width, height, solved.segments, solved.obstacles, solved.ballR, music);
@@ -189,38 +194,41 @@ function cameraTarget(
 ): [number, number, number] {
   const ball = pointOn(segments, time);
   const [vx, vy] = velocity(segments, time);
-  const aheadX = ball[0] + vx * 0.18;
-  const aheadY = ball[1] + vy * 0.18;
+  const aheadX = ball[0] + vx * 0.16;
+  const aheadY = ball[1] + vy * 0.16;
   let minX = Infinity;
   let maxX = -Infinity;
   let minY = Infinity;
   let maxY = -Infinity;
   const consider = (x: number, y: number, pad: number) => {
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return;
     minX = Math.min(minX, x - pad);
     maxX = Math.max(maxX, x + pad);
     minY = Math.min(minY, y - pad);
     maxY = Math.max(maxY, y + pad);
   };
-  const start = Math.max(segments[0]?.t0 ?? 0, time - 3.3);
-  const end = time + 0.42;
-  for (let cursor = start; cursor <= end; cursor += 0.14) {
+  const start = Math.max(segments[0]?.t0 ?? 0, time - 11);
+  const end = time + 0.55;
+  for (let cursor = start; cursor <= end; cursor += 0.18) {
     const point = pointOn(segments, cursor);
-    consider(point[0], point[1], ballR);
+    consider(point[0], point[1], ballR * 2);
   }
-  consider(ball[0], ball[1], ballR * 2.4);
-  consider(aheadX, aheadY, ballR);
+  consider(ball[0], ball[1], 80);
+  consider(aheadX, aheadY, 40);
   for (const obstacle of obstacles) {
     if (obstacle.hitTime < start || obstacle.hitTime > end) continue;
-    consider(obstacle.x, obstacle.y, Math.min(obstacle.size, 160) * 0.28 + ballR);
+    consider(obstacle.x, obstacle.y, 90);
   }
-  const spanX = Math.max(maxX - minX, 760);
-  const spanY = Math.max(maxY - minY, 480);
-  const fitted = Math.min((width * 0.84) / spanX, (height * 0.8) / spanY);
-  const floor = 18 / ballR;
-  const breath = 1 + 0.045 * energy;
-  if (fitted < floor) return [aheadX, aheadY, floor * breath];
-  const zoom = clamp(fitted, floor, 1.15) * breath;
-  return [(minX + maxX) * 0.31 + aheadX * 0.69, (minY + maxY) * 0.31 + aheadY * 0.69, zoom];
+  if (!Number.isFinite(minX) || !Number.isFinite(ball[0]) || !Number.isFinite(ball[1])) {
+    return [Number.isFinite(ball[0]) ? ball[0] : 0, Number.isFinite(ball[1]) ? ball[1] : 0, 0.62];
+  }
+  const spanX = Math.max(maxX - minX, 980);
+  const spanY = Math.max(maxY - minY, 640);
+  const fitted = Math.min((width * 0.88) / spanX, (height * 0.84) / spanY);
+  const zoom = clamp(fitted, 0.46, 0.78) * (1 + 0.03 * (Number.isFinite(energy) ? energy : 0));
+  const cx = (minX + maxX) * 0.62 + (Number.isFinite(aheadX) ? aheadX : ball[0]) * 0.38;
+  const cy = (minY + maxY) * 0.62 + (Number.isFinite(aheadY) ? aheadY : ball[1]) * 0.38;
+  return [Number.isFinite(cx) ? cx : ball[0], Number.isFinite(cy) ? cy : ball[1], Number.isFinite(zoom) ? zoom : 0.62];
 }
 
 function bakeCamera(
@@ -242,14 +250,17 @@ function bakeCamera(
     const time = frame * BAKE_DT;
     const energy = sectionAt(music, time).energy;
     const [tx, ty, tz] = cameraTarget(width, height, segments, obstacles, ballR, time, energy);
+    const nextX = Number.isFinite(tx) ? tx : cx;
+    const nextY = Number.isFinite(ty) ? ty : cy;
+    const nextZ = Number.isFinite(tz) ? tz : cz;
     if (frame === 0) {
-      cx = tx;
-      cy = ty;
-      cz = tz;
+      cx = nextX;
+      cy = nextY;
+      cz = nextZ;
     } else {
-      cx = damp(cx, tx, BAKE_DT, 3.6);
-      cy = damp(cy, ty, BAKE_DT, 3.6);
-      cz = damp(cz, tz, BAKE_DT, 2);
+      cx = damp(cx, nextX, BAKE_DT, 3.6);
+      cy = damp(cy, nextY, BAKE_DT, 3.6);
+      cz = damp(cz, nextZ, BAKE_DT, 2);
     }
     x[frame] = cx;
     y[frame] = cy;
@@ -258,17 +269,68 @@ function bakeCamera(
   return { x, y, z };
 }
 
+/** Keeps the ball inside the frame even when the baked camera or the course is bad. */
+export function framedView(state: MapState, time: number): {
+  camX: number;
+  camY: number;
+  zoom: number;
+  ballX: number;
+  ballY: number;
+} {
+  const raw = pointOn(state.segments, time);
+  const worldX = Number.isFinite(raw[0]) ? raw[0] : 0;
+  const worldY = Number.isFinite(raw[1]) ? raw[1] : 0;
+  let camX = Number.isFinite(sampleCurve(state.camX, BAKE_DT, time)) ? sampleCurve(state.camX, BAKE_DT, time) : worldX;
+  let camY = Number.isFinite(sampleCurve(state.camY, BAKE_DT, time)) ? sampleCurve(state.camY, BAKE_DT, time) : worldY;
+  let zoom = sampleCurve(state.camZ, BAKE_DT, time);
+  if (!Number.isFinite(zoom)) zoom = 0.62;
+  zoom = clamp(zoom, 0.35, 1.4);
+  let ballX = (worldX - camX) * zoom + state.width / 2;
+  let ballY = (worldY - camY) * zoom + state.height / 2;
+  const padX = state.width * 0.16;
+  const padY = state.height * 0.16;
+  if (ballX < padX || ballX > state.width - padX || ballY < padY || ballY > state.height - padY) {
+    camX = worldX;
+    camY = worldY;
+    ballX = state.width / 2;
+    ballY = state.height / 2;
+  }
+  return { camX, camY, zoom, ballX, ballY };
+}
+
+export function sampleBallScreens(
+  music: MusicData,
+  seed: number,
+  skin: string,
+  width: number,
+  height: number,
+  times: number[],
+): { time: number; x: number; y: number; onScreen: boolean }[] {
+  const state = buildMap(width, height, music, seed, skin);
+  return times.map((time) => {
+    const view = framedView(state, time);
+    const onScreen =
+      Number.isFinite(view.ballX) &&
+      Number.isFinite(view.ballY) &&
+      view.ballX >= 20 &&
+      view.ballX <= width - 20 &&
+      view.ballY >= 20 &&
+      view.ballY <= height - 20;
+    return { time, x: view.ballX, y: view.ballY, onScreen };
+  });
+}
+
 function paintMap(
   ctx: CanvasRenderingContext2D,
   state: MapState,
   time: number,
   view: { post: { glow: number; grain: number; vignette: number } },
 ): void {
-  const camX = sampleCurve(state.camX, BAKE_DT, time);
-  const camY = sampleCurve(state.camY, BAKE_DT, time);
-  const zoom = sampleCurve(state.camZ, BAKE_DT, time);
+  const framed = framedView(state, time);
+  const camX = framed.camX;
+  const camY = framed.camY;
+  const zoom = framed.zoom;
   const pulse = timesPulse(state.beats, time, 0.035, 0.14);
-  const ball = pointOn(state.segments, time);
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.globalAlpha = 1;
   ctx.globalCompositeOperation = "source-over";
@@ -291,74 +353,126 @@ function paintMap(
     ctx.arc(x, y, state.width * 0.26, 0, TAU);
     ctx.fill();
   }
-  ctx.save();
-  ctx.translate(state.width / 2, state.height / 2);
-  ctx.scale(zoom, zoom);
-  ctx.translate(-camX, -camY);
-  paintCourse(ctx, state, time);
-  for (const obstacle of state.obstacles) paintObstacle(ctx, state, obstacle, time - obstacle.hitTime);
-  paintRings(ctx, state, time);
-  paintBall(ctx, state, ball[0], ball[1], pulse);
-  ctx.restore();
+  const project = (x: number, y: number): [number, number] => [
+    (x - camX) * zoom + state.width / 2,
+    (y - camY) * zoom + state.height / 2,
+  ];
+  paintCourse(ctx, state, time, project, zoom);
+  for (const obstacle of state.obstacles) paintObstacle(ctx, state, obstacle, time - obstacle.hitTime, project, zoom);
+  paintRings(ctx, state, time, project, zoom);
+  paintBall(ctx, state, framed.ballX, framed.ballY, state.ballR * zoom, pulse);
   view.post.glow = state.light ? 0.35 : 0.85 + 0.2 * pulse;
   view.post.grain = state.light ? 0.35 : 0.75;
   view.post.vignette = state.light ? 0.45 : 0.9;
 }
 
-function paintCourse(ctx: CanvasRenderingContext2D, state: MapState, time: number): void {
-  const window = 5.4;
-  const start = Math.max(state.segments[0]?.t0 ?? 0, time - window);
-  const points: { x: number; y: number; t: number }[] = [];
-  for (let cursor = start; cursor < time; cursor += 0.045) {
-    const point = pointOn(state.segments, cursor);
-    points.push({ x: point[0], y: point[1], t: cursor });
-  }
-  const live = pointOn(state.segments, time);
-  points.push({ x: live[0], y: live[1], t: time });
+function paintCourse(
+  ctx: CanvasRenderingContext2D,
+  state: MapState,
+  time: number,
+  project: (x: number, y: number) => [number, number],
+  zoom: number,
+): void {
+  const span = 14;
+  const points = coursePoints(state, time, span).map((point) => {
+    const [x, y] = project(point.x, point.y);
+    return { x, y, t: point.t };
+  });
   if (points.length < 2) return;
-  ctx.lineCap = "round";
-  ctx.lineJoin = "round";
+  paintRibbon(ctx, points, time, span, 18 * zoom, state.skin.ball, state.light ? 0.28 : 0.45);
+  paintRibbon(ctx, points, time, span, 3.6 * zoom, [1, 1, 1], state.light ? 0.62 : 0.95);
+}
+
+function coursePoints(state: MapState, time: number, span: number): { x: number; y: number; t: number }[] {
+  const start = Math.max(state.segments[0]?.t0 ?? 0, time - span);
+  const points: { x: number; y: number; t: number }[] = [];
+  const push = (t: number) => {
+    if (t < start - 1e-3 || t > time + 1e-3) return;
+    const point = pointOn(state.segments, t);
+    const last = points[points.length - 1];
+    if (last && Math.abs(last.t - t) < 1e-3) return;
+    points.push({ x: point[0], y: point[1], t });
+  };
+  for (const segment of state.segments) {
+    if (segment.t1 < start || segment.t0 > time) continue;
+    const t0 = Math.max(segment.t0, start);
+    const t1 = Math.min(segment.t1, time);
+    const steps = Math.max(1, Math.round((t1 - t0) / 0.04));
+    for (let step = 0; step <= steps; step++) push(t0 + ((t1 - t0) * step) / steps);
+  }
+  push(time);
+  return points;
+}
+
+function paintRibbon(
+  ctx: CanvasRenderingContext2D,
+  points: { x: number; y: number; t: number }[],
+  time: number,
+  span: number,
+  width: number,
+  color: [number, number, number],
+  alpha: number,
+): void {
+  const half = width / 2;
+  const left: { x: number; y: number }[] = [];
+  const right: { x: number; y: number }[] = [];
+  for (let index = 0; index < points.length; index++) {
+    const before = points[Math.max(0, index - 1)];
+    const after = points[Math.min(points.length - 1, index + 1)];
+    let dx = after.x - before.x;
+    let dy = after.y - before.y;
+    const length = Math.hypot(dx, dy) || 1;
+    dx /= length;
+    dy /= length;
+    left.push({ x: points[index].x - dy * half, y: points[index].y + dx * half });
+    right.push({ x: points[index].x + dy * half, y: points[index].y - dx * half });
+  }
   for (let index = 1; index < points.length; index++) {
-    const a = points[index - 1];
-    const b = points[index];
-    const fade = clamp(1 - (time - b.t) / window, 0, 1) ** 1.35;
+    const fade = clamp(1 - (time - points[index].t) / span, 0, 1) ** 1.15;
+    if (fade < 0.03) continue;
+    ctx.fillStyle = rgba(color[0], color[1], color[2], alpha * fade);
     ctx.beginPath();
-    ctx.moveTo(a.x, a.y);
-    ctx.lineTo(b.x, b.y);
-    ctx.strokeStyle = rgba(state.skin.ball[0], state.skin.ball[1], state.skin.ball[2], (state.light ? 0.28 : 0.5) * fade);
-    ctx.lineWidth = 22;
-    ctx.stroke();
-    ctx.strokeStyle = rgba(1, 1, 1, (state.light ? 0.4 : 0.92) * fade);
-    ctx.lineWidth = 3.4;
-    ctx.stroke();
+    ctx.moveTo(left[index - 1].x, left[index - 1].y);
+    ctx.lineTo(left[index].x, left[index].y);
+    ctx.lineTo(right[index].x, right[index].y);
+    ctx.lineTo(right[index - 1].x, right[index - 1].y);
+    ctx.closePath();
+    ctx.fill();
   }
 }
 
 function presence(age: number): number {
-  if (age < -0.45 || age > 9.2) return 0;
-  const born = age < 0 ? smoothstep((age + 0.45) / 0.45) : 1;
-  const fade = age > 6.4 ? smoothstep(1 - (age - 6.4) / 2.8) : 1;
+  if (age < -0.4 || age > 24) return 0;
+  const born = age < 0 ? smoothstep((age + 0.4) / 0.4) : 1;
+  const fade = age > 9 ? clamp(1 - (age - 9) / 15, 0, 1) : 1;
   return born * fade;
 }
 
-function paintObstacle(ctx: CanvasRenderingContext2D, state: MapState, obstacle: Obstacle, age: number): void {
+function paintObstacle(
+  ctx: CanvasRenderingContext2D,
+  state: MapState,
+  obstacle: Obstacle,
+  age: number,
+  project: (x: number, y: number) => [number, number],
+  zoom: number,
+): void {
   const alpha = presence(age);
   if (alpha <= 0.02) return;
-  const flash = age >= 0 && age < 0.3 ? 1 - age / 0.3 : 0;
-  const color = mixWhite(kindColor(state, obstacle.kind), 0.55 * flash);
+  const flash = age >= 0 && age < 0.32 ? 1 - age / 0.32 : 0;
+  const color = mixWhite(kindColor(state, obstacle.kind), 0.7 * flash);
   if (obstacle.kind === "peg") {
-    paintPeg(ctx, state, obstacle, color, alpha, flash);
+    paintPeg(ctx, state, obstacle, color, alpha, flash, project, zoom);
     return;
   }
   if (obstacle.kind === "spinner") {
-    paintSpinner(ctx, state, obstacle, color, alpha, age);
+    paintSpinner(ctx, state, obstacle, color, alpha, age, project, zoom);
     return;
   }
   ctx.save();
-  place(ctx, obstacle, state.ballR);
+  place(ctx, obstacle, state.ballR, project, zoom);
   if (obstacle.kind === "platform" && obstacle.variant === "arch") paintArch(ctx, obstacle, color, alpha);
   else if (obstacle.kind === "pad") paintPad(ctx, obstacle, color, alpha, flash);
-  else paintWall(ctx, obstacle, color, alpha, flash);
+  else paintWall(ctx, state, obstacle, color, alpha, flash);
   ctx.restore();
 }
 
@@ -375,29 +489,52 @@ function mixWhite(color: [number, number, number], amount: number): [number, num
   ];
 }
 
-function place(ctx: CanvasRenderingContext2D, obstacle: Obstacle, ballR: number): void {
-  ctx.translate(obstacle.x + obstacle.nx * ballR, obstacle.y + obstacle.ny * ballR);
+function place(
+  ctx: CanvasRenderingContext2D,
+  obstacle: Obstacle,
+  ballR: number,
+  project: (x: number, y: number) => [number, number],
+  zoom: number,
+): void {
+  const [x, y] = project(obstacle.x + obstacle.nx * ballR, obstacle.y + obstacle.ny * ballR);
+  ctx.translate(x, y);
   ctx.rotate(Math.atan2(obstacle.ny, obstacle.nx));
+  ctx.scale(zoom, zoom);
 }
 
 function paintWall(
   ctx: CanvasRenderingContext2D,
+  state: MapState,
   obstacle: Obstacle,
   color: [number, number, number],
   alpha: number,
   flash: number,
 ): void {
-  const length = obstacle.size;
-  const thick = obstacle.variant === "short" ? 14 : 18;
-  const radius = Math.min(7, thick * 0.42);
+  const length = wallLength(obstacle, state.obstacles);
+  const thick = 20;
+  const radius = 6;
   slab(ctx, 0, -length / 2, thick, length, color, alpha, radius, flash);
-  if (obstacle.variant === "double") {
-    slab(ctx, thick + 16, -length * 0.42, thick * 0.75, length * 0.84, color, alpha * 0.95, radius, flash);
+  if (flash > 0.05) {
+    ctx.fillStyle = rgba(1, 1, 1, 0.55 * flash * alpha);
+    roundRect(ctx, -3, -length / 2, thick + 8, length, radius);
+    ctx.fill();
   }
-  if (obstacle.variant === "corner") {
-    const arm = Math.max(54, length * 0.42);
-    slab(ctx, 0, length / 2 - thick, arm, thick, color, alpha, radius, flash);
+}
+
+/** One bar, centred on the contact, kept clear of the neighbouring hit. */
+function wallLength(obstacle: Obstacle, obstacles: Obstacle[]): number {
+  let room = 300;
+  for (const other of obstacles) {
+    if (other === obstacle) continue;
+    const dx = other.x - obstacle.x;
+    const dy = other.y - obstacle.y;
+    const along = Math.abs(dx * obstacle.tx + dy * obstacle.ty);
+    const across = Math.abs(dx * obstacle.nx + dy * obstacle.ny);
+    if (across > 110) continue;
+    room = Math.min(room, Math.max(108, along - 40));
   }
+  const wanted = obstacle.size < 110 ? 168 : Math.min(240, Math.max(168, obstacle.size));
+  return Math.min(wanted, room);
 }
 
 function paintArch(
@@ -451,16 +588,20 @@ function paintPeg(
   color: [number, number, number],
   alpha: number,
   flash: number,
+  project: (x: number, y: number) => [number, number],
+  zoom: number,
 ): void {
-  const cx = obstacle.x + obstacle.nx * (state.ballR + obstacle.pegR);
-  const cy = obstacle.y + obstacle.ny * (state.ballR + obstacle.pegR);
-  const disks = [[cx, cy, obstacle.pegR]];
+  const [cx, cy] = project(
+    obstacle.x + obstacle.nx * (state.ballR + obstacle.pegR),
+    obstacle.y + obstacle.ny * (state.ballR + obstacle.pegR),
+  );
+  const disks = [[cx, cy, obstacle.pegR * zoom]];
   if (obstacle.variant === "pair") {
-    disks.push([
-      cx + obstacle.tx * obstacle.pegR * 2.4,
-      cy + obstacle.ty * obstacle.pegR * 2.4,
-      obstacle.pegR * 0.78,
-    ]);
+    const [px, py] = project(
+      obstacle.x + obstacle.nx * (state.ballR + obstacle.pegR) + obstacle.tx * obstacle.pegR * 2.4,
+      obstacle.y + obstacle.ny * (state.ballR + obstacle.pegR) + obstacle.ty * obstacle.pegR * 2.4,
+    );
+    disks.push([px, py, obstacle.pegR * 0.78 * zoom]);
   }
   for (const [x, y, radius] of disks) {
     const halo = ctx.createRadialGradient(x, y, radius * 0.2, x, y, radius * 2.2);
@@ -484,13 +625,17 @@ function paintSpinner(
   color: [number, number, number],
   alpha: number,
   age: number,
+  project: (x: number, y: number) => [number, number],
+  zoom: number,
 ): void {
   const length = obstacle.size * (obstacle.variant === "short" ? 0.7 : obstacle.variant === "long" ? 1.35 : 1);
   const thick = obstacle.variant === "short" ? 22 : 14;
   const spin = Math.atan2(obstacle.ty, obstacle.tx) + 2.4 * Math.max(0, age);
+  const [x, y] = project(obstacle.x + obstacle.nx * state.ballR, obstacle.y + obstacle.ny * state.ballR);
   ctx.save();
-  ctx.translate(obstacle.x + obstacle.nx * state.ballR, obstacle.y + obstacle.ny * state.ballR);
+  ctx.translate(x, y);
   ctx.rotate(spin);
+  ctx.scale(zoom, zoom);
   slab(ctx, -length / 2, -thick, length, thick, color, alpha, Math.min(7, thick * 0.45), 0);
   ctx.restore();
 }
@@ -521,23 +666,29 @@ function slab(
   ctx.stroke();
 }
 
-function paintRings(ctx: CanvasRenderingContext2D, state: MapState, time: number): void {
+function paintRings(
+  ctx: CanvasRenderingContext2D,
+  state: MapState,
+  time: number,
+  project: (x: number, y: number) => [number, number],
+  zoom: number,
+): void {
   for (let index = state.obstacles.length - 1; index >= 0; index--) {
     const obstacle = state.obstacles[index];
     const age = time - obstacle.hitTime;
     if (age < 0) continue;
     if (age > 0.34) break;
     const fade = 1 - age / 0.34;
+    const [x, y] = project(obstacle.x, obstacle.y);
     ctx.strokeStyle = rgba(state.skin.ball[0], state.skin.ball[1], state.skin.ball[2], 0.8 * fade);
-    ctx.lineWidth = 2.2 * fade + 0.6;
+    ctx.lineWidth = (2.2 * fade + 0.8) * zoom;
     ctx.beginPath();
-    ctx.arc(obstacle.x, obstacle.y, state.ballR + age * 150, 0, TAU);
+    ctx.arc(x, y, (state.ballR + age * 150) * zoom, 0, TAU);
     ctx.stroke();
   }
 }
 
-function paintBall(ctx: CanvasRenderingContext2D, state: MapState, x: number, y: number, pulse: number): void {
-  const radius = state.ballR;
+function paintBall(ctx: CanvasRenderingContext2D, state: MapState, x: number, y: number, radius: number, pulse: number): void {
   const halo = ctx.createRadialGradient(x, y, radius * 0.4, x, y, radius * 3.1);
   halo.addColorStop(0, rgba(state.skin.ball[0], state.skin.ball[1], state.skin.ball[2], 0.5 + 0.2 * pulse));
   halo.addColorStop(1, rgba(state.skin.ball[0], state.skin.ball[1], state.skin.ball[2], 0));

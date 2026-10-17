@@ -110,7 +110,7 @@ export function solveMap(music: MusicData, seed: number, skinName: string): { ob
   let lane = (xorshift32(rng) * 2 - 1) * Math.PI;
   let side = xorshift32(rng) < 0.5 ? 1 : -1;
   let heading = lane + side * SPREAD;
-  let rowLen = 8;
+  let rowLen = 4;
   let rowLeft = rowLen;
   let turns = 0;
   let stepOut = false;
@@ -131,6 +131,7 @@ export function solveMap(music: MusicData, seed: number, skinName: string): { ob
   const medianDt = gaps.length ? gaps.slice().sort((a, b) => a - b)[gaps.length >> 1] : 0.5;
   const polys: Poly[] = [];
   deduped.forEach(([beat, isStrong], index) => {
+    try {
     const section = phraseAt(phrases, beat);
     const [phrase, speed, spread, bowFrac, extend] = phraseMotion(section.label, index, isStrong);
     if (extend && phrase !== lastPhrase) rowLeft += 2;
@@ -151,8 +152,11 @@ export function solveMap(music: MusicData, seed: number, skinName: string): { ob
     let nextSpread = spread;
     rowLeft -= 1;
     let wantTurn = rowLeft <= 0;
-    if (wantTurn && held < 12 && obstacles.length >= 8) {
-      const nextDir = lane + Math.PI / 2;
+    // A square turn whose next side would run back through the cloud waits,
+    // but only briefly: a long hold is what stretches one heading across the frame.
+    const turnSign = turns % 8 < 4 ? 1 : -1;
+    if (wantTurn && held < 3 && obstacles.length >= 8) {
+      const nextDir = lane + turnSign * Math.PI / 2;
       if (roomAhead(pos, heading, obstacles) > 700 && roomAhead(pos, nextDir, obstacles) < 1100) {
         wantTurn = false;
         rowLeft = 1;
@@ -162,9 +166,9 @@ export function solveMap(music: MusicData, seed: number, skinName: string): { ob
     }
     if (wantTurn) {
       held = 0;
-      nextLane = lane + Math.PI / 2;
+      nextLane = lane + turnSign * Math.PI / 2;
       turns += 1;
-      if (turns % 2 === 0) rowLen += 3;
+      if (turns % 2 === 0) rowLen = Math.min(5, rowLen + 1);
       rowLeft = rowLen;
       nextSpread = phrase === "cluster" ? 0.22 : 0.12;
       nextSide = side;
@@ -221,20 +225,119 @@ export function solveMap(music: MusicData, seed: number, skinName: string): { ob
     side = nextSide;
     const actual = Math.atan2(ovy, ovx);
     heading = aimsInto(hit, actual, obstacles) && !aimsInto(hit, planned, obstacles) ? planned : actual;
+    if (!Number.isFinite(heading)) heading = lane;
     void flourish;
+    } catch {
+      pushStraight(obstacles, segments, pos, tPrev, beat, heading, isStrong);
+      const last = obstacles[obstacles.length - 1];
+      pos = [last.x, last.y];
+      tPrev = beat;
+    }
   });
   if (music.duration > tPrev + 1e-3) {
-    const [ivx, ivy] = unit(Math.cos(heading), Math.sin(heading));
-    const dist = 680 * (music.duration - tPrev);
-    const guess: Pt = [pos[0] + ivx * dist, pos[1] + ivy * dist];
-    const routed = avoidOverlap(pos, guess, [ivx, ivy], [ivx, ivy], polys, dist, obstacles, segments, tPrev, music.duration, false);
-    const end = routed[0];
-    segments.push({ t0: tPrev, t1: music.duration, x0: pos[0], y0: pos[1], x1: end[0], y1: end[1], bow: 0 });
+    try {
+      const [ivx, ivy] = unit(Math.cos(heading), Math.sin(heading));
+      const dist = 680 * (music.duration - tPrev);
+      const guess: Pt = [pos[0] + ivx * dist, pos[1] + ivy * dist];
+      const routed = avoidOverlap(pos, guess, [ivx, ivy], [ivx, ivy], polys, dist, obstacles, segments, tPrev, music.duration, false);
+      const end = routed[0];
+      segments.push({
+        t0: tPrev,
+        t1: music.duration,
+        x0: Number.isFinite(pos[0]) ? pos[0] : 0,
+        y0: Number.isFinite(pos[1]) ? pos[1] : 0,
+        x1: Number.isFinite(end[0]) ? end[0] : (Number.isFinite(pos[0]) ? pos[0] : 0) + dist,
+        y1: Number.isFinite(end[1]) ? end[1] : Number.isFinite(pos[1]) ? pos[1] : 0,
+        bow: 0,
+      });
+    } catch {
+      pushStraight(obstacles, segments, pos, tPrev, music.duration, heading, false);
+    }
   }
-  alignNormals(obstacles, segments);
-  seat(obstacles, segments);
-  spread(obstacles, segments);
+  try {
+    alignNormals(obstacles, segments);
+    seat(obstacles, segments);
+    spread(obstacles, segments);
+  } catch {
+    // A failed tidy-up keeps the course that was already flown.
+  }
+  sanitizeCourse(obstacles, segments, music.duration);
   return { obstacles, segments, ballR: BALL_R };
+}
+
+function pushStraight(
+  obstacles: Obstacle[],
+  segments: Segment[],
+  pos: Pt,
+  tPrev: number,
+  beat: number,
+  heading: number,
+  strong: boolean,
+): void {
+  const [ux, uy] = unit(Math.cos(heading), Math.sin(heading));
+  const originX = Number.isFinite(pos[0]) ? pos[0] : 0;
+  const originY = Number.isFinite(pos[1]) ? pos[1] : 0;
+  const hit: Pt = [originX + ux * 220, originY + uy * 220];
+  obstacles.push({
+    kind: "wall",
+    hitTime: Number.isFinite(beat) ? beat : tPrev,
+    x: hit[0],
+    y: hit[1],
+    nx: -uy,
+    ny: ux,
+    tx: ux,
+    ty: uy,
+    strong,
+    energy: 0.4,
+    section: "mid",
+    size: 168,
+    pegR: 0,
+    variant: "long",
+  });
+  segments.push({
+    t0: Number.isFinite(tPrev) ? tPrev : 0,
+    t1: Math.max(Number.isFinite(beat) ? beat : tPrev + 0.2, (Number.isFinite(tPrev) ? tPrev : 0) + 1e-3),
+    x0: originX,
+    y0: originY,
+    x1: hit[0],
+    y1: hit[1],
+    bow: 0,
+  });
+}
+
+function num(value: number, fallback = 0): number {
+  return Number.isFinite(value) ? value : fallback;
+}
+
+function sanitizeCourse(obstacles: Obstacle[], segments: Segment[], duration: number): void {
+  for (const segment of segments) {
+    segment.t0 = num(segment.t0);
+    segment.t1 = num(segment.t1, segment.t0 + 0.1);
+    if (segment.t1 <= segment.t0) segment.t1 = segment.t0 + 0.1;
+    segment.x0 = num(segment.x0);
+    segment.y0 = num(segment.y0);
+    segment.x1 = num(segment.x1, segment.x0 + 200);
+    segment.y1 = num(segment.y1, segment.y0);
+    segment.bow = num(segment.bow);
+  }
+  for (const obstacle of obstacles) {
+    obstacle.x = num(obstacle.x);
+    obstacle.y = num(obstacle.y);
+    obstacle.hitTime = num(obstacle.hitTime);
+    obstacle.size = num(obstacle.size, 168);
+    if (!(obstacle.size > 8)) obstacle.size = 168;
+    const [nx, ny] = unit(num(obstacle.nx), num(obstacle.ny, -1));
+    obstacle.nx = nx;
+    obstacle.ny = ny;
+    obstacle.tx = -ny;
+    obstacle.ty = nx;
+    obstacle.pegR = num(obstacle.pegR);
+    if (!obstacle.kind) obstacle.kind = "wall";
+    if (!obstacle.variant) obstacle.variant = "long";
+  }
+  if (!segments.length) {
+    segments.push({ t0: 0, t1: Math.max(duration, 0.5), x0: 0, y0: 0, x1: 640, y1: 0, bow: 0 });
+  }
 }
 
 export function pointOn(segments: Segment[], time: number): Pt {
@@ -265,8 +368,9 @@ function xorshift32(state: { v: number }): number {
 }
 
 function unit(x: number, y: number): Pt {
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return [1, 0];
   const mag = Math.hypot(x, y);
-  if (mag < 1e-8) return [1, 0];
+  if (!(mag > 1e-8)) return [1, 0];
   return [x / mag, y / mag];
 }
 
