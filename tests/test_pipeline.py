@@ -285,6 +285,14 @@ class PipelineTest(unittest.TestCase):
         for star in stars.stars:
             self.assertAlmostEqual(stars.brightness(star, star.time), 1.0, places=4)
             self.assertEqual(stars.brightness(star, star.time - 1.0), 0.0)
+        for left_index, left in enumerate(stars.stars):
+            for right in stars.stars[left_index + 1 :]:
+                self.assertGreaterEqual(math.hypot(left.x - right.x, left.y - right.y), 60.0)
+        for index, (a, b) in enumerate(stars.links):
+            for c, d in stars.links[index + 1 :]:
+                if len({a, b, c, d}) < 4:
+                    continue
+                self.assertFalse(_segments_cross(stars.stars[a], stars.stars[b], stars.stars[c], stars.stars[d]))
         self.assertEqual(stars.timing["max_timing_error_s"], 0.0)
 
         renderer = CairoRenderer(640, 360, fps=30)
@@ -292,6 +300,13 @@ class PipelineTest(unittest.TestCase):
             scene.update(1 / 30, min(1.0, analysis.duration * 0.5), [])
             frame = renderer.draw(scene)
             self.assertEqual(len(frame), 640 * 360 * 4)
+
+
+def _segments_cross(a, b, c, d) -> bool:
+    def orient(p, q, r) -> float:
+        return (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x)
+
+    return orient(a, b, c) * orient(a, b, d) < 0 and orient(c, d, a) * orient(c, d, b) < 0
 
 
 if __name__ == "__main__":
