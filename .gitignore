@@ -4,6 +4,8 @@ assets/
 prototypes/out/
 prototypes/web/node_modules/
 prototypes/web/dist/
+web/node_modules/
+web/dist/
 prototypes/rust/target/
 *.mp4
 *.m4a

@@ -91,6 +91,16 @@ python -m unittest tests.test_pipeline
 | `prototypes/rust` | rustfft + tiny-skia + ffmpeg |
 | `legacy/` | 原来的 pygame 演示，只能开窗口，不能导出视频 |
 | `docs/tech-comparison.md` | 实测对比和推荐理由 |
+| `docs/web-platform.md` | 浏览器版架构：MusicData、模板 API、导出、市场和代理 |
+| `web/` | 浏览器原型。上传音频、在本地分析、雨夜模板实时预览、客户端导出 |
 | `tools/make_test_track.py` | 生成 30 秒测试音频和标准节拍 |
 
 原型复现步骤见对比文档。仓库里的 mp3 是旧演示用的素材，评分和示例视频用的是脚本生成的测试曲。
+
+浏览器版的约定写在 `docs/web-platform.md`。本地预览：
+
+```bash
+cd web
+npm install
+npm run dev
+```

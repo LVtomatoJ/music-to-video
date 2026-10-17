@@ -1,0 +1,20 @@
+{
+  "name": "music-to-video-web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview --host 127.0.0.1 --port 4173 --strictPort",
+    "capture": "node scripts/capture.mjs"
+  },
+  "dependencies": {
+    "mp4-muxer": "^5.2.2"
+  },
+  "devDependencies": {
+    "puppeteer-core": "^24.15.0",
+    "typescript": "^5.6.3",
+    "vite": "^6.3.5"
+  }
+}
