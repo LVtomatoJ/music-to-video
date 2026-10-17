@@ -114,6 +114,8 @@ export function solveMap(music: MusicData, seed: number, skinName: string): { ob
   let turnSide = side;
   let runLeft = 0;
   let runMode: RunMode = "wander";
+  let sameSide = 0;
+  let lastAngle = 0;
   let stepOut = false;
   let pos: Pt = [0, 0];
   let tPrev = 0;
@@ -137,25 +139,43 @@ export function solveMap(music: MusicData, seed: number, skinName: string): { ob
     if (extend && phrase !== lastPhrase) stepOut = true;
     lastPhrase = phrase;
     const dt = Math.max(1e-3, beat - tPrev);
-    let length = speed * dt * (0.82 + spread * 0.45);
-    if (medianDt < 0.55) length = Math.min(length, 340 * Math.sqrt(dt / medianDt));
+    let length = speed * dt * (0.4 + spread * 0.06);
+    if (medianDt < 0.55) length = Math.min(length, 210 * Math.sqrt(dt / medianDt));
     if (stepOut) {
-      length *= 1.35;
+      length *= 1.08;
       stepOut = false;
     }
     if (runLeft <= 0) {
       turnSide = -turnSide;
-      const picked = pickRun(music, beat, rng);
-      runLeft = picked.left;
-      runMode = picked.mode;
+      sameSide = 0;
+      if (runMode !== "drift") {
+        runMode = "drift";
+        runLeft = 6 + Math.floor(xorshift32(rng) * 5);
+      } else {
+        const picked = pickRun(music, beat, rng);
+        runLeft = picked.left;
+        runMode = picked.mode;
+      }
     }
     runLeft -= 1;
-    if (runMode === "spiral") length *= 0.78;
-    if (runMode === "drift") length *= 1.12;
+    length = Math.max(170, Math.min(230, length));
+    if (runMode === "spiral") length *= 1.2;
     const drive = bounceDrive(music, beat, isStrong, tPrev, section.energy, rng);
+    const angleLimit = runMode === "drift" ? (18 * Math.PI) / 180 : MAX_TURN;
+    let angle = separateAngle(turnAngle(drive, runMode, rng), lastAngle, angleLimit, rng);
+    const open = (300 * Math.PI) / 180;
+    if (Math.abs(sameSide + turnSide * angle) >= open) {
+      turnSide = -turnSide;
+      sameSide = 0;
+      runMode = "drift";
+      runLeft = 6 + Math.floor(xorshift32(rng) * 5);
+      angle = Math.min(angle, (14 * Math.PI) / 180);
+    }
     const prevSeg = segments[segments.length - 1];
     const base = prevSeg ? Math.atan2(prevSeg.y1 - prevSeg.y0, prevSeg.x1 - prevSeg.x0) : heading;
-    const bend = turnSide * turnAngle(drive, runMode, rng);
+    const bend = turnSide * angle;
+    sameSide += bend;
+    lastAngle = angle;
     const flown = base + bend;
     let [ivx, ivy] = unit(Math.cos(flown), Math.sin(flown));
     let hit: Pt = [pos[0] + ivx * length, pos[1] + ivy * length];
@@ -439,11 +459,27 @@ function bounceDrive(
 }
 
 function turnAngle(drive: number, mode: RunMode, rng: { v: number }): number {
-  const jitter = (xorshift32(rng) - 0.5) * ((14 * Math.PI) / 180);
+  const jitter = (xorshift32(rng) - 0.5) * ((16 * Math.PI) / 180);
   let angle = MIN_TURN + (MAX_TURN - MIN_TURN) * drive;
-  if (mode === "drift" && drive < 0.55) angle = MIN_TURN + ((18 * Math.PI) / 180 - MIN_TURN) * drive;
-  if (mode === "spiral") angle = (52 * Math.PI) / 180 + ((75 - 52) * Math.PI) / 180 * Math.max(drive, 0.35);
-  return Math.max(MIN_TURN, Math.min(MAX_TURN, angle + jitter));
+  if (mode === "drift") angle = MIN_TURN + ((10 * Math.PI) / 180) * (0.35 + 0.65 * (1 - drive));
+  if (mode === "spiral") angle = (36 * Math.PI) / 180 + ((70 - 36) * Math.PI) / 180 * drive;
+  const limit = mode === "drift" ? (18 * Math.PI) / 180 : MAX_TURN;
+  return Math.max(MIN_TURN, Math.min(limit, angle + jitter));
+}
+
+function separateAngle(angle: number, previous: number, limit: number, rng: { v: number }): number {
+  const gap = (16 * Math.PI) / 180;
+  const clamped = Math.max(MIN_TURN, Math.min(limit, angle));
+  if (!(previous > 0) || Math.abs(clamped - previous) >= gap) return clamped;
+  const kick = gap + xorshift32(rng) * ((20 * Math.PI) / 180);
+  const first = xorshift32(rng) < 0.5 ? previous + kick : previous - kick;
+  const candidate = Math.max(MIN_TURN, Math.min(limit, first));
+  if (Math.abs(candidate - previous) >= gap) return candidate;
+  const other = Math.max(MIN_TURN, Math.min(limit, previous * 2 - first));
+  if (Math.abs(other - previous) >= gap - 1e-6) return other;
+  const step = Math.min(gap * 0.4, (limit - MIN_TURN) * 0.45);
+  const nudged = clamped >= (limit + MIN_TURN) / 2 ? clamped - step : clamped + step;
+  return Math.max(MIN_TURN, Math.min(limit, nudged));
 }
 
 function pickRun(music: MusicData, beat: number, rng: { v: number }): { left: number; mode: RunMode } {
@@ -452,8 +488,8 @@ function pickRun(music: MusicData, beat: number, rng: { v: number }): { left: nu
   if (roll < 0.12 + (1 - loud) * 0.2) {
     return { left: 6 + Math.floor(xorshift32(rng) * 8), mode: "drift" };
   }
-  if (roll > 0.7 + (1 - loud) * 0.14) {
-    return { left: 4 + Math.floor(xorshift32(rng) * 5), mode: "spiral" };
+  if (roll > 0.72 + (1 - loud) * 0.12) {
+    return { left: 3 + Math.floor(xorshift32(rng) * 2), mode: "spiral" };
   }
   const span = 2 + Math.floor(xorshift32(rng) * 4 + loud * 3);
   return { left: Math.max(2, Math.min(8, span)), mode: "wander" };
