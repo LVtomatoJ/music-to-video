@@ -213,11 +213,11 @@ function beatPulse(beats: number[], time: number): number {
   return level;
 }
 
-function velocity(segments: Segment[], time: number): [number, number] {
-  const before = pointOn(segments, time - 0.05);
-  const after = pointOn(segments, time + 0.05);
-  return [(after[0] - before[0]) / 0.1, (after[1] - before[1]) / 0.1];
-}
+/** Previous settled scale. Zoom may move 0.7×–1.3× around it, and no further than the size limits. */
+const CAMERA_SCALE = 0.46;
+const VIEW_AT_1024 = 1024 / 1600;
+const ZOOM_MIN = Math.max(CAMERA_SCALE * 0.7, 10 / (28 * 1.4 * VIEW_AT_1024), 40 / (156 * VIEW_AT_1024));
+const ZOOM_MAX = Math.min(CAMERA_SCALE * 1.3, 14 / (28 * 1.4 * VIEW_AT_1024), 60 / (156 * VIEW_AT_1024));
 
 function cameraTarget(
   width: number,
@@ -226,12 +226,10 @@ function cameraTarget(
   obstacles: Obstacle[],
   ballR: number,
   time: number,
-  energy: number,
+  _energy: number,
 ): [number, number, number] {
   const ball = pointOn(segments, time);
-  if (!Number.isFinite(ball[0]) || !Number.isFinite(ball[1])) return [0, 0, 0.7];
-  const [vx, vy] = velocity(segments, time);
-  const speed = Math.hypot(vx, vy) || 1;
+  if (!Number.isFinite(ball[0]) || !Number.isFinite(ball[1])) return [0, 0, CAMERA_SCALE];
   let minX = Infinity;
   let maxX = -Infinity;
   let minY = Infinity;
@@ -243,25 +241,34 @@ function cameraTarget(
     minY = Math.min(minY, y - pad);
     maxY = Math.max(maxY, y + pad);
   };
-  const start = historyStart(segments, obstacles, time);
+  let to = obstacles.length;
+  while (to > 0 && obstacles[to - 1].hitTime > time + 1e-3) to -= 1;
+  const from = Math.max(0, to - 8);
+  let start = segments[0]?.t0 ?? 0;
+  if (from < to) {
+    const oldest = obstacles[from].hitTime;
+    for (const segment of segments) {
+      if (Math.abs(segment.t1 - oldest) < 1e-2) {
+        start = segment.t0;
+        break;
+      }
+    }
+  }
   for (let cursor = start; cursor <= time + 1e-6; cursor += 0.08) {
     const point = pointOn(segments, Math.min(cursor, time));
-    consider(point[0], point[1], ballR + 8);
+    consider(point[0], point[1], ballR);
   }
-  consider(ball[0], ball[1], ballR + 8);
-  const { from, to } = recentRange(obstacles, time);
-  for (let index = from; index < to; index++) consider(obstacles[index].x, obstacles[index].y, 70);
-  const spanX = Math.max(maxX - minX, 160);
-  const spanY = Math.max(maxY - minY, 120);
-  const lead = (0.06 + 0.03 * clamp(Number.isFinite(energy) ? energy : 0, 0, 1)) * Math.max(spanX, spanY);
-  consider(ball[0] + (vx / speed) * lead, ball[1] + (vy / speed) * lead, ballR);
-  const fitX = Math.max(maxX - minX, 160);
-  const fitY = Math.max(maxY - minY, 120);
-  const zoom = clamp(Math.min((width * 0.64) / fitX, (height * 0.64) / fitY), 0.46, 0.54);
-  const ahead = (0.14 * Math.min(width, height)) / zoom;
-  const lookX = ball[0] + (vx / speed) * ahead;
-  const lookY = ball[1] + (vy / speed) * ahead;
-  return [Number.isFinite(lookX) ? lookX : ball[0], Number.isFinite(lookY) ? lookY : ball[1], Number.isFinite(zoom) ? zoom : 0.7];
+  consider(ball[0], ball[1], ballR);
+  for (let index = from; index < to; index++) consider(obstacles[index].x, obstacles[index].y, ballR);
+  const boxX = (minX + maxX) / 2;
+  const boxY = (minY + maxY) / 2;
+  const lookX = boxX * 0.6 + ball[0] * 0.4;
+  const lookY = boxY * 0.6 + ball[1] * 0.4;
+  const reachX = Math.max(lookX - minX, maxX - lookX, 40);
+  const reachY = Math.max(lookY - minY, maxY - lookY, 40);
+  const fitted = Math.min((width * 0.425) / reachX, (height * 0.425) / reachY);
+  const zoom = clamp(fitted, ZOOM_MIN, ZOOM_MAX);
+  return [Number.isFinite(lookX) ? lookX : ball[0], Number.isFinite(lookY) ? lookY : ball[1], Number.isFinite(zoom) ? zoom : CAMERA_SCALE];
 }
 
 /** Exact step of a critically damped spring. No overshoot, so the camera does not ring on a turn. */
@@ -318,7 +325,7 @@ function bakeCamera(
   return { x, y, z };
 }
 
-/** Nudges a bad baked camera just enough to keep the ball inside the frame. */
+/** Keeps the ball inside 15–85% and, while that still has room, slides the last eight walls back onto the frame. */
 export function framedView(state: MapState, time: number): {
   camX: number;
   camY: number;
@@ -337,13 +344,13 @@ export function framedView(state: MapState, time: number): {
     camY = worldY;
     zoom = 0.7;
   }
-  zoom = clamp(zoom, 0.44, 0.56);
+  zoom = clamp(zoom, ZOOM_MIN, ZOOM_MAX);
   let ballX = (worldX - camX) * zoom + state.width / 2;
   let ballY = (worldY - camY) * zoom + state.height / 2;
-  const minX = state.width * 0.2;
-  const maxX = state.width * 0.8;
-  const minY = state.height * 0.2;
-  const maxY = state.height * 0.8;
+  const minX = state.width * 0.15;
+  const maxX = state.width * 0.85;
+  const minY = state.height * 0.15;
+  const maxY = state.height * 0.85;
   if (ballX < minX) {
     camX -= (minX - ballX) / zoom;
     ballX = minX;
@@ -357,6 +364,37 @@ export function framedView(state: MapState, time: number): {
   } else if (ballY > maxY) {
     camY += (ballY - maxY) / zoom;
     ballY = maxY;
+  }
+  const seen = state.obstacles.filter((obstacle) => obstacle.hitTime <= time + 1e-3).slice(-8);
+  const project = (obstacle: Obstacle): [number, number] => [
+    (obstacle.x - camX) * zoom + state.width / 2,
+    (obstacle.y - camY) * zoom + state.height / 2,
+  ];
+  if (seen.length) {
+    const points = seen.map(project);
+    const lowX = Math.min(...points.map((point) => point[0]));
+    const highX = Math.max(...points.map((point) => point[0]));
+    const lowY = Math.min(...points.map((point) => point[1]));
+    const highY = Math.max(...points.map((point) => point[1]));
+    const edge = 12;
+    if (lowX < edge) {
+      const shift = Math.min(edge - lowX, maxX - ballX);
+      camX -= shift / zoom;
+      ballX += shift;
+    } else if (highX > state.width - edge) {
+      const shift = Math.min(highX - (state.width - edge), ballX - minX);
+      camX += shift / zoom;
+      ballX -= shift;
+    }
+    if (lowY < edge) {
+      const shift = Math.min(edge - lowY, maxY - ballY);
+      camY -= shift / zoom;
+      ballY += shift;
+    } else if (highY > state.height - edge) {
+      const shift = Math.min(highY - (state.height - edge), ballY - minY);
+      camY += shift / zoom;
+      ballY -= shift;
+    }
   }
   return { camX, camY, zoom, ballX, ballY };
 }
