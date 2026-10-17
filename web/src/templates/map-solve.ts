@@ -38,6 +38,7 @@ export interface Obstacle {
 type Pt = [number, number];
 type Poly = [Pt, Pt, number];
 type Phrase = "cluster" | "stretch" | "corridor" | "curve";
+type RunMode = "drift" | "spiral" | "wander";
 type Mood = "calm" | "mid" | "intense";
 
 interface PhraseSection {
@@ -110,7 +111,9 @@ export function solveMap(music: MusicData, seed: number, skinName: string): { ob
   let lane = (xorshift32(rng) * 2 - 1) * Math.PI;
   let side = xorshift32(rng) < 0.5 ? 1 : -1;
   let heading = lane + side * SPREAD;
-  let turns = 0;
+  let turnSide = side;
+  let runLeft = 0;
+  let runMode: RunMode = "wander";
   let stepOut = false;
   let pos: Pt = [0, 0];
   let tPrev = 0;
@@ -133,35 +136,35 @@ export function solveMap(music: MusicData, seed: number, skinName: string): { ob
     const [phrase, speed, spread, extend] = phraseMotion(section.label, index, isStrong);
     if (extend && phrase !== lastPhrase) stepOut = true;
     lastPhrase = phrase;
-    let travel = heading;
-    if (obstacles.length >= 8 && insideCloud(pos, obstacles, 160)) travel = nudgeOut(pos, heading, obstacles);
-    let [ivx, ivy] = unit(Math.cos(travel), Math.sin(travel));
     const dt = Math.max(1e-3, beat - tPrev);
-    let length = speed * dt;
+    let length = speed * dt * (0.82 + spread * 0.45);
     if (medianDt < 0.55) length = Math.min(length, 340 * Math.sqrt(dt / medianDt));
     if (stepOut) {
-      length *= 1.55;
+      length *= 1.35;
       stepOut = false;
     }
-    // Hold a gentle bend for a few bounces, then bend the other way.
-    // The leg is aimed from the previous segment, so avoidance cannot straighten it into a corridor.
-    const turnSign = turns % 8 < 4 ? 1 : -1;
-    turns += 1;
-    const wobble = ((index % 5) - 2) * 0.045;
+    if (runLeft <= 0) {
+      turnSide = -turnSide;
+      const picked = pickRun(music, beat, rng);
+      runLeft = picked.left;
+      runMode = picked.mode;
+    }
+    runLeft -= 1;
+    if (runMode === "spiral") length *= 0.78;
+    if (runMode === "drift") length *= 1.12;
+    const drive = bounceDrive(music, beat, isStrong, tPrev, section.energy, rng);
     const prevSeg = segments[segments.length - 1];
     const base = prevSeg ? Math.atan2(prevSeg.y1 - prevSeg.y0, prevSeg.x1 - prevSeg.x0) : heading;
-    const flown = base + turnSign * 0.5 + wobble;
-    let [ivx2, ivy2] = unit(Math.cos(flown), Math.sin(flown));
-    let hit: Pt = [pos[0] + ivx2 * length, pos[1] + ivy2 * length];
+    const bend = turnSide * turnAngle(drive, runMode, rng);
+    const flown = base + bend;
+    let [ivx, ivy] = unit(Math.cos(flown), Math.sin(flown));
+    let hit: Pt = [pos[0] + ivx * length, pos[1] + ivy * length];
     const nextLane = flown;
-    const nextSide = side;
-    const nextSpread = Math.min(spread, 0.08);
-    const out = flown + turnSign * 0.32 + nextSide * nextSpread;
+    const nextSide = turnSide;
+    const out = flown + bend * 0.35;
     let [ovx, ovy] = unit(Math.cos(out), Math.sin(out));
     const planned = out;
-    [hit, ivx2, ivy2, ovx, ovy] = limitTurn(prevSeg, pos, hit, ivx2, ivy2, ovx, ovy);
-    ivx = ivx2;
-    ivy = ivy2;
+    [hit, ivx, ivy, ovx, ovy] = limitTurn(prevSeg, pos, hit, ivx, ivy, ovx, ovy);
     const kind = chooseKind(pool, isStrong, counts, lastKind, rng);
     counts[kind] += 1;
     lastKind = kind;
@@ -354,6 +357,108 @@ function xorshift32(state: { v: number }): number {
   return x / 4294967296;
 }
 
+function loudAt(music: MusicData, time: number): number {
+  const value = interp(music.loudness.times, music.loudness.values, time);
+  return Math.max(0, Math.min(1, Number.isFinite(value) ? value : 0.4));
+}
+
+function nearestRow(times: number[], time: number): number {
+  if (!times.length) return 0;
+  let lo = 0;
+  let hi = times.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (times[mid] < time) lo = mid + 1;
+    else hi = mid;
+  }
+  if (lo > 0 && Math.abs(times[lo - 1] - time) < Math.abs(times[lo] - time)) return lo - 1;
+  return lo;
+}
+
+function onsetAt(music: MusicData, time: number): number {
+  let best = 0;
+  for (const onset of music.onsets) {
+    const gap = Math.abs(onset.time - time);
+    if (gap > 0.12) continue;
+    best = Math.max(best, onset.strength * (1 - gap / 0.12));
+  }
+  return Math.max(0, Math.min(1, best));
+}
+
+function accentAt(music: MusicData, time: number, strong: boolean): number {
+  const marks = music.downbeats.length ? music.downbeats : music.beats.filter((_, index) => index % 4 === 0);
+  const downbeat = marks.some((hit) => Math.abs(hit - time) <= 0.045);
+  return Math.min(1, (strong ? 0.62 : 0) + (downbeat ? 0.48 : 0));
+}
+
+function pitchMove(music: MusicData, time: number, prev: number): number {
+  const chroma = music.extensions?.chroma;
+  if (chroma && chroma.times.length > 1 && chroma.values.length > 1) {
+    const before = chroma.values[nearestRow(chroma.times, prev)] ?? [];
+    const after = chroma.values[nearestRow(chroma.times, time)] ?? [];
+    let delta = 0;
+    for (let index = 0; index < 12; index++) delta += Math.abs((after[index] ?? 0) - (before[index] ?? 0));
+    return Math.min(1, delta / 1.35);
+  }
+  const tones = music.extensions?.tones;
+  if (!tones?.length) return 0;
+  const midiNear = (at: number) => {
+    let best = tones[0];
+    let gap = Infinity;
+    for (const tone of tones) {
+      const distance = Math.abs(tone.time - at);
+      if (distance < gap) {
+        gap = distance;
+        best = tone;
+      }
+    }
+    return gap < 0.45 ? best.midi : null;
+  };
+  const from = midiNear(prev);
+  const to = midiNear(time);
+  if (from == null || to == null) return 0;
+  return Math.min(1, Math.abs(to - from) / 7);
+}
+
+/** 0 is a quiet drift, 1 is a hard accent. */
+function bounceDrive(
+  music: MusicData,
+  beat: number,
+  strong: boolean,
+  prev: number,
+  energy: number,
+  rng: { v: number },
+): number {
+  const loud = loudAt(music, beat);
+  const onset = music.onsets.length ? onsetAt(music, beat) : loud;
+  const accent = accentAt(music, beat, strong);
+  const pitch = pitchMove(music, beat, prev);
+  const jitter = (xorshift32(rng) - 0.5) * 0.16;
+  const drive = 0.2 * loud + 0.28 * onset + 0.28 * accent + 0.14 * pitch + 0.16 * Math.max(0, Math.min(1, energy)) + jitter;
+  return Math.max(0, Math.min(1, drive));
+}
+
+function turnAngle(drive: number, mode: RunMode, rng: { v: number }): number {
+  const jitter = (xorshift32(rng) - 0.5) * ((14 * Math.PI) / 180);
+  let angle = MIN_TURN + (MAX_TURN - MIN_TURN) * drive;
+  if (mode === "drift" && drive < 0.55) angle = MIN_TURN + ((18 * Math.PI) / 180 - MIN_TURN) * drive;
+  if (mode === "spiral") angle = (52 * Math.PI) / 180 + ((75 - 52) * Math.PI) / 180 * Math.max(drive, 0.35);
+  return Math.max(MIN_TURN, Math.min(MAX_TURN, angle + jitter));
+}
+
+function pickRun(music: MusicData, beat: number, rng: { v: number }): { left: number; mode: RunMode } {
+  const loud = loudAt(music, beat);
+  const roll = xorshift32(rng);
+  if (roll < 0.12 + (1 - loud) * 0.2) {
+    return { left: 6 + Math.floor(xorshift32(rng) * 8), mode: "drift" };
+  }
+  if (roll > 0.7 + (1 - loud) * 0.14) {
+    return { left: 4 + Math.floor(xorshift32(rng) * 5), mode: "spiral" };
+  }
+  const span = 2 + Math.floor(xorshift32(rng) * 4 + loud * 3);
+  return { left: Math.max(2, Math.min(8, span)), mode: "wander" };
+}
+
 function unit(x: number, y: number): Pt {
   if (!Number.isFinite(x) || !Number.isFinite(y)) return [1, 0];
   const mag = Math.hypot(x, y);
@@ -459,8 +564,9 @@ function insideCloud(pos: Pt, obstacles: Obstacle[], margin: number): boolean {
   return pos[0] >= minX - margin && pos[0] <= maxX + margin && pos[1] >= minY - margin && pos[1] <= maxY + margin;
 }
 
-/** Keep each bounce turning forward. A larger kink folds the trail back into a Z. */
-const MAX_TURN = (52 * Math.PI) / 180;
+/** A bounce may be sharp, but it still has to keep going forward. */
+const MAX_TURN = (75 * Math.PI) / 180;
+const MIN_TURN = (8 * Math.PI) / 180;
 
 function limitTurn(
   prev: Segment | undefined,
@@ -492,14 +598,6 @@ function limitTurn(
   const oc = Math.cos(delta);
   const os = Math.sin(delta);
   return [[pos[0] + nx * len, pos[1] + ny * len], nx, ny, ovx * oc - ovy * os, ovx * os + ovy * oc];
-}
-
-function nudgeOut(pos: Pt, heading: number, obstacles: Obstacle[]): number {
-  const [cx, cy] = cloudCenter(obstacles);
-  const away = Math.atan2(pos[1] - cy, pos[0] - cx);
-  let delta = Math.atan2(Math.sin(away - heading), Math.cos(away - heading));
-  delta = Math.max(-0.65, Math.min(0.65, delta * 0.5));
-  return heading + delta;
 }
 
 function aimsInto(origin: Pt, angle: number, obstacles: Obstacle[]): boolean {
