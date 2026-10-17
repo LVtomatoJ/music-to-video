@@ -31,7 +31,7 @@ music2video -i song.mp3 -o field.mp4 --scene balls
 | `-i, --input` | wav、mp3，或 ffmpeg 能读的其它音频 |
 | `-o, --output` | 输出的 mp4 |
 | `--aspect` | `16:9` 为 1920×1080，`9:16` 为 1080×1920 |
-| `--scene` | `map`（默认）一颗球走生成的地图；`balls` 是原来的多球场地；`city` 夜城生长，`piano` 音符瀑布，`stars` 星座 |
+| `--scene` | `map`（默认）一颗球走生成的地图；`balls` 是原来的多球场地；`city` 夜城生长，`piano` 音符瀑布，`stars` 星座，`rain` 雨夜水面 |
 | `--theme` | 整支片子只用一种皮肤。`neon` 霓虹、`arcade` 街机、`piano` 琴键、`shatter` 冲击、`pastel` 柔彩。`auto` 按整首歌的能量选一种，不会中途混用 |
 | `--fps` | 默认 30 |
 | `--seed` | 地图走向和障碍种类的随机种子，默认 42 |
@@ -61,15 +61,16 @@ music2video -i song.mp3 -o field.mp4 --scene balls
 
 `--scene balls` 保留原来的多球场地：每拍反向并换色，强拍爆粒子。
 
-另外三种画面不走球和地图，节拍或旋律仍然对齐，并且用同一套成片处理：2 倍分辨率绘制再缩小、柔光、暗角、颗粒，镜头只做阻尼跟随。
+另外四种画面不走球和地图，节拍或旋律仍然对齐，并且用同一套成片处理：2 倍分辨率绘制再缩小、柔光、暗角、颗粒，镜头只做阻尼跟随。
 
 | `--scene` | 画面 | 对齐 |
 | --- | --- | --- |
 | `city` | 夜色里一座城市长出来。前景的楼跟着拍长高，到点后轻轻过冲再落回。窗灯顺着拍子从街面往上亮，低音时再亮一档。车灯和电车在强的段落里更快。镜头提前把正在长的楼和下一栋放进画面，拍上轻轻一推，再缓缓拉远，结尾露出整条天际线 | 楼在拍点上长到预定高度 |
 | `piano` | 四音组的键盘铺满画面，键有高光和倒影。旋律之外，每拍还有和弦音，低音落在低音区，强拍再走一条上行的分解。光条之间同一键不重叠。按下的键向上打出光柱，背景跟着这些颜色一起呼吸 | librosa 的音高、色度和 onset。音头在自己的时间上碰到键 |
+| `rain` | 月光下的一片水面。每个音头是一滴雨：先顺着风斜着落下，倒影迎上来，落水时一闪、溅起几颗水珠，再荡开几圈涟漪，涟漪彼此穿过，远侧亮、近侧暗。响的音雨滴更大更亮、圈更多；圈的速度和间距跟着速度走；强拍落下大雨滴、回弹的水柱，水面轻轻亮一下，隔几个强拍来一阵风，雨丝改变斜度。落点每次挑离最近的雨滴最远的地方，不会叠在一处，也不会排成格子；同时存在的涟漪多了，旧的会更快淡掉。两拍之间还有更细更淡的小雨，随响度变密，月光倒影被涟漪推得晃动 | 雨滴正好在 onset 或拍点上落水 |
 | `stars` | 一个音点亮一颗星。星有大小和冷暖，软核加短星芒。一句连成一个弯折的星座，彼此分开、线不交叉。背景是深蓝紫的夜空和淡淡的银河 | 星星在音符到来时达到最亮 |
 
-这三支片子不跟 `--theme` 换肤，各用自己的夜色。地图和多球场不受影响。
+这几支片子不跟 `--theme` 换肤，各用自己的夜色。地图和多球场不受影响。
 
 加一种障碍或撞击效果：在 `music2video/registry.py` 里调用 `register_object` / `register_effect`。加一种皮肤：在 `music2video/themes.py` 里 `register_theme`，写上飞行物、`Feel`、障碍和效果。分析、场景、绘制、编码互不调用。
 
@@ -84,7 +85,7 @@ python -m unittest tests.test_pipeline
 
 | 路径 | 内容 |
 | --- | --- |
-| `music2video/` | 正式 CLI。`analysis.py`、`notes.py`、`mapscene.py`、`forms.py`、`themes.py`、`registry.py`、`scene.py`、`render.py`、`encode.py`、`cli.py` |
+| `music2video/` | 正式 CLI。`analysis.py`、`notes.py`、`mapscene.py`、`forms.py`、`rain.py`、`themes.py`、`registry.py`、`scene.py`、`render.py`、`encode.py`、`cli.py` |
 | `prototypes/python` | librosa + cairo 原型 |
 | `prototypes/web` | Web Audio AnalyserNode + Canvas + WebCodecs |
 | `prototypes/rust` | rustfft + tiny-skia + ffmpeg |

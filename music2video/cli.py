@@ -31,9 +31,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--aspect", choices=sorted(ASPECTS), default="16:9")
     parser.add_argument(
         "--scene",
-        choices=("map", "balls", "city", "piano", "stars"),
+        choices=("map", "balls", "city", "piano", "stars", "rain"),
         default="map",
-        help="map: one ball on a beat map; balls: the older multi-ball field; city, piano, stars: other beat-synced forms",
+        help="map: one ball on a beat map; balls: the older multi-ball field; city, piano, stars, rain: other beat-synced forms",
     )
     parser.add_argument("--fps", type=int, default=30)
     parser.add_argument("--seed", type=int, default=42)

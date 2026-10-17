@@ -317,6 +317,30 @@ class PipelineTest(unittest.TestCase):
             frame = renderer.draw(scene)
             self.assertEqual(len(frame), 640 * 360 * 4)
 
+    def test_rain_drops_land_on_the_music(self) -> None:
+        analysis = analyze(self.wav, Path(self.tmp.name))
+        rain = build_scene("rain", 1920, 1080, analysis, 42, "neon")
+        self.assertEqual(rain.form, "rain")
+        main_drops = [drop for drop in rain.drops if drop.kind in ("note", "beat")]
+        self.assertGreaterEqual(len(main_drops), len(analysis.beats))
+        landed = [drop.time for drop in main_drops]
+        # Every beat has a drop that splashes exactly on it.
+        for beat in analysis.beats:
+            self.assertTrue(any(abs(beat - when) < 1e-9 for when in landed), beat)
+        strong = {round(beat, 4) for beat in analysis.strong_beats}
+        for drop in main_drops:
+            if round(drop.time, 4) in strong:
+                self.assertTrue(drop.strong)
+        # Drops landing close in time are well apart on screen, and never pile up.
+        self.assertGreaterEqual(rain.sync_report["min_landing_gap_px"], 120.0)
+        positions = {(round(drop.u, 3), round(drop.d, 3)) for drop in main_drops}
+        self.assertEqual(len(positions), len(main_drops))
+        self.assertLessEqual(rain.sync_report["peak_live"], 60)
+        self.assertEqual(rain.timing["max_timing_error_s"], 0.0)
+        renderer = CairoRenderer(640, 360, fps=30)
+        rain.update(1 / 30, min(1.0, analysis.duration * 0.5), [])
+        self.assertEqual(len(renderer.draw(rain)), 640 * 360 * 4)
+
 
 def _growth_starts_in_frame(city, analysis, fps: int = 30) -> int:
     """Step like the CLI. Count towers whose body is inside a 10% margin at growth start.

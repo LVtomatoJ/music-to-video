@@ -75,16 +75,21 @@ class CairoRenderer:
             self._caption(scene)
             self._vignette()
             self._grain(scene)
-        elif form in {"city", "piano", "stars"}:
+        elif form in {"city", "piano", "stars", "rain"}:
             bind_palette_name(getattr(scene, "palette_name", "neon"))
             output = self.ctx
             self.ctx = self.hi_ctx
             self.ctx.identity_matrix()
             self.ctx.scale(2, 2)
             self.ctx.set_operator(cairo.OPERATOR_SOURCE)
-            from music2video.forms import paint_form
+            if form == "rain":
+                from music2video.rain import paint_rain
 
-            paint_form(self.ctx, scene)
+                paint_rain(self.ctx, scene)
+            else:
+                from music2video.forms import paint_form
+
+                paint_form(self.ctx, scene)
             self.ctx = output
             self._downsample()
             self._bloom()
