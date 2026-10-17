@@ -40,6 +40,28 @@ def _smooth(u: float) -> float:
     return u * u * (3.0 - 2.0 * u)
 
 
+def _pulse(age: float, attack: float, release: float) -> float:
+    """Smooth bump. Zero slope at the start and the end, so a beat eases in and out."""
+    if age < 0.0 or age >= attack + release:
+        return 0.0
+    if age < attack:
+        return _smooth(age / max(attack, 1e-4))
+    return _smooth(1.0 - (age - attack) / max(release, 1e-4))
+
+
+def _times_pulse(times, now: float, attack: float, release: float) -> float:
+    level = 0.0
+    span = attack + release
+    for hit in times:
+        if hit > now:
+            break
+        age = now - hit
+        if age >= span:
+            continue
+        level = max(level, _pulse(age, attack, release))
+    return level
+
+
 def _damp(current: float, target: float, dt: float, rate: float) -> float:
     return current + (target - current) * (1.0 - math.exp(-rate * dt))
 
@@ -110,6 +132,7 @@ class CityScene:
     sky_stars: list[tuple[float, float, float, float]]
     timing: dict
     sync_report: dict
+    sections: tuple = ()
     caption_title: str = ""
     caption_artist: str = ""
     time: float = 0.0
@@ -124,26 +147,33 @@ class CityScene:
             return 0.0
         u = (when - (building.born - building.grow)) / building.grow
         if u >= 1.0:
+            age = when - building.born
+            settle = 0.36
+            # Exact target on the beat, then a small rise and return. Width stays put.
+            if 0.0 < age < settle:
+                bump = math.sin(math.pi * age / settle)
+                lift = 0.032 * (0.6 + 0.4 * building.energy)
+                return building.target * (1.0 + lift * bump)
             return building.target
         return building.target * _smooth(u)
 
     def street_glow(self, time: float | None = None) -> float:
         when = self.time if time is None else time
-        glow = 0.0
-        for hit in self.bass_times:
-            age = when - hit
-            if 0.0 <= age < 0.48:
-                glow = max(glow, _smooth(1.0 - age / 0.48))
-        return glow
+        return _times_pulse(self.bass_times, when, 0.05, 0.42)
 
     def beat_pulse(self, time: float | None = None) -> float:
         when = self.time if time is None else time
-        pulse = 0.0
-        for hit in self.beat_times:
-            age = when - hit
-            if 0.0 <= age < 0.18:
-                pulse = max(pulse, _smooth(1.0 - age / 0.18))
-        return pulse
+        return _times_pulse(self.beat_times, when, 0.04, 0.16)
+
+    def energy_area(self, time: float) -> float:
+        """Integral of section energy. Continuous, so faster cars do not jump."""
+        area = 0.0
+        for section in self.sections:
+            start = max(0.0, section.start)
+            end = min(time, section.end)
+            if end > start:
+                area += (end - start) * section.energy
+        return area
 
     def _cover_index(self, time: float) -> int:
         """Rightmost tower that should already be inside the frame.
@@ -200,8 +230,12 @@ class CityScene:
         # faster than a pan, and don't punch back in on a bass hit.
         zoom_rate = 3.6 if target_zoom < self._cam_zoom else 1.6
         self._cam_zoom = _damp(self._cam_zoom, target_zoom, dt, zoom_rate)
+        energy = section_at(self.sections, time).energy if self.sections else 0.4
+        # A short push on the beat. The framing margin is wide enough that this
+        # stays inside the picture; it is not a zoom back toward a tight crop.
+        push = 0.016 * self.beat_pulse(time) * (0.4 + 0.6 * energy)
         self.cam_x = self._cam_x
-        self.cam_zoom = self._cam_zoom
+        self.cam_zoom = self._cam_zoom * (1.0 + push)
 
 
 def _low_energy(analysis: Analysis, time: float) -> float:
@@ -336,6 +370,7 @@ def _build_city(width: int, height: int, analysis: Analysis, seed: int) -> CityS
         sky_stars=sky_stars,
         timing={},
         sync_report={},
+        sections=tuple(analysis.sections),
     )
     worst = 0.0
     for building in buildings:
@@ -504,10 +539,11 @@ def _paint_building(ctx, scene: CityScene, building: Building, pal) -> None:
         sign_w = building.width * (0.42 if building.sign == 1 else 0.55)
         sign_x = building.x + (building.width - sign_w) * 0.5
         sign_y = -risen * (0.62 if building.roof == 0 else 0.48)
+        breathe = 0.78 + 0.22 * scene.street_glow()
         if building.sign == 1:
-            color = (1.0, 0.55, 0.28, 0.85)
+            color = (1.0, 0.55, 0.28, 0.85 * breathe)
         else:
-            color = (0.45, 0.85, 1.0, 0.8)
+            color = (0.45, 0.85, 1.0, 0.8 * breathe)
         glow = cairo.LinearGradient(sign_x, sign_y, sign_x + sign_w, sign_y)
         glow.add_color_stop_rgba(0, color[0], color[1], color[2], 0.0)
         glow.add_color_stop_rgba(0.15, *color)
@@ -574,21 +610,25 @@ def _paint_street(ctx, scene: CityScene, pal, glow: float) -> None:
         ctx.rectangle(dash, 78, 28, 2.4)
         ctx.fill()
         dash += 64
-    _paint_tram(ctx, left, span, scene.time, max(glow, pulse))
+    _paint_tram(ctx, left, span, scene.time, scene.energy_area(scene.time) * 42.0, max(glow, pulse))
     # Two lanes. The near lane is lower, thicker, and faster.
     lanes = ((44.0, 8.0, 1.0), (112.0, 12.0, -1.0))
     for index in range(8):
         lane_y, thick, direction = lanes[index % 2]
         speed = 170.0 + (index % 4) * 55.0 + (40.0 if direction < 0 else 0.0)
         length = 190.0 + 90.0 * max(pulse, 0.45 * glow) + (index % 3) * 24.0
-        travel = (scene.time * speed + index * span / 8.0) % (span + length + 80.0)
+        # Extra distance is the integral of energy, so a louder section speeds the lane
+        # without teleporting a car when the section changes.
+        travel = (scene.time * speed + scene.energy_area(scene.time) * (64.0 + (index % 3) * 16.0) + index * span / 8.0) % (
+            span + length + 80.0
+        )
         _paint_headlight(ctx, left, right, lane_y, thick, direction, length, travel, pulse)
 
 
-def _paint_tram(ctx, left: float, span: float, time: float, flare: float) -> None:
+def _paint_tram(ctx, left: float, span: float, time: float, boost: float, flare: float) -> None:
     tram_w = 340.0
     tram_h = 32.0
-    tram_x = left + ((time * 78.0) % (span + tram_w + 160.0)) - tram_w
+    tram_x = left + ((time * 78.0 + boost) % (span + tram_w + 160.0)) - tram_w
     y = 14.0
     ctx.set_source_rgba(0.04, 0.045, 0.06, 0.98)
     _round_rect(ctx, tram_x, y, tram_w, tram_h, 5)
@@ -664,10 +704,24 @@ def _paint_windows(ctx, scene: CityScene, building: Building, risen: float, pal)
             if y < -risen + 6:
                 continue
             level = lit.get((col, row), 0.0)
+            lag = (building.floors - 1 - row) * 0.03
+            ripple = 0.0
+            for hit in scene.beat_times:
+                ripple = max(ripple, _pulse(scene.time - hit - lag, 0.045, 0.14))
+            bass = scene.street_glow()
             if level <= 0.0:
-                ctx.set_source_rgba(0.02, 0.03, 0.05, 0.65)
+                sheen = max(0.07 * ripple, 0.05 * bass)
+                if sheen <= 0.01:
+                    ctx.set_source_rgba(0.02, 0.03, 0.05, 0.65)
+                else:
+                    ctx.set_source_rgba(pal.accent[0], pal.accent[1], pal.accent[2], 0.10 + 0.55 * sheen)
             else:
-                ctx.set_source_rgba(pal.accent[0], pal.accent[1], pal.accent[2], min(1.0, level))
+                ctx.set_source_rgba(
+                    pal.accent[0],
+                    pal.accent[1],
+                    pal.accent[2],
+                    min(1.0, level + 0.22 * ripple + 0.16 * bass),
+                )
             _round_rect(ctx, x, y, win_w, win_h, 1.6)
             ctx.fill()
 
@@ -679,6 +733,7 @@ class KeyNote:
     midi: int
     display: int
     source: str
+    span: float = 0.0
 
 
 @dataclass
@@ -702,8 +757,12 @@ class PianoScene:
     caption_title: str = ""
     caption_artist: str = ""
     time: float = 0.0
+    cam_x: float = 0.0
     cam_zoom: float = 1.0
+    keyboard_dip: float = 0.0
+    beat_level: float = 0.0
     _cam_zoom: float = 1.0
+    _energy: float = 0.4
 
     def key_center(self, midi: int) -> tuple[float, float]:
         shown = self._clamp_midi(midi)
@@ -713,15 +772,36 @@ class PianoScene:
             x = self.key_left + self._whites_before(shown) * self.key_w
         return x, self.key_top
 
+    def fall_offset(self, remain: float) -> float:
+        """How far above the key an event still is. Zero once it has landed.
+
+        Mostly steady, a little slower at the ends, and never flat — a flat
+        arrival would stack the next note on top of this one.
+        """
+        travel = self.key_top * 0.92
+        if remain <= 0.0:
+            return 0.0
+        speed = travel / max(self.lead, 1e-3)
+        if remain >= self.lead:
+            return travel + (remain - self.lead) * speed * 0.72
+        t = remain / self.lead
+        eased = (0.72 * t) + (0.28 * _smooth(t))
+        return travel * eased
+
     def note_head(self, note: KeyNote, time: float | None = None) -> tuple[float, float]:
         when = self.time if time is None else time
         x, key_y = self.key_center(note.display)
-        speed = (key_y * 0.92) / self.lead
-        if when >= note.time:
-            y = key_y
-        else:
-            y = key_y - (note.time - when) * speed
-        return x, y
+        return x, key_y - self.fall_offset(note.time - when)
+
+    def note_bounds(self, note: KeyNote, time: float | None = None) -> tuple[float, float]:
+        """Top and bottom of the drawn pill. The tail is the release, above the head."""
+        when = self.time if time is None else time
+        _, key_y = self.key_center(note.display)
+        head = key_y - self.fall_offset(note.time - when)
+        if note.span <= 0.02:
+            return head, head
+        tail = key_y - self.fall_offset(note.time + note.span - when)
+        return tail, head
 
     def _clamp_midi(self, midi: int) -> int:
         while midi < self.lo:
@@ -735,14 +815,21 @@ class PianoScene:
 
     def _target_zoom(self, time: float) -> float:
         del time
-        # The keyboard stays put. The press, not a zoom, is the motion.
-        return 1.0
+        # Chorus leans in a little. The keys and the notes share this scale.
+        return 1.0 + 0.04 * self._energy
 
     def update(self, dt: float, time: float, events: list[tuple[float, bool]]) -> None:
         del events
         self.time = time
-        self._cam_zoom = _damp(self._cam_zoom, self._target_zoom(time), dt, 1.8)
-        self.cam_zoom = self._cam_zoom
+        raw = section_at(self.analysis.sections, time).energy
+        self._energy = _damp(self._energy, raw, dt, 1.15)
+        self._cam_zoom = _damp(self._cam_zoom, self._target_zoom(time), dt, 1.25)
+        beat = _times_pulse(self.analysis.beats, time, 0.04, 0.15)
+        strong = _times_pulse(self.analysis.strong_beats, time, 0.045, 0.18)
+        self.beat_level = beat
+        self.cam_zoom = self._cam_zoom * (1.0 + 0.012 * beat * (0.35 + 0.65 * self._energy))
+        self.cam_x = (1.6 + 6.0 * self._energy) * math.sin(time * 0.62)
+        self.keyboard_dip = (3.0 + 4.2 * self._energy) * strong
 
 
 def _build_piano(width: int, height: int, analysis: Analysis, seed: int) -> PianoScene:
@@ -762,11 +849,17 @@ def _build_piano(width: int, height: int, analysis: Analysis, seed: int) -> Pian
         lo -= lo % 12
         if hi % 12 != 11:
             hi += (11 - hi % 12) % 12
-    notes = [
-        KeyNote(tone.time, tone.duration, tone.midi, tone.midi, tone.source)
-        for tone in tones
-        if 0.0 <= tone.time <= analysis.duration + 1e-3
-    ]
+    notes = []
+    for tone in tones:
+        if not 0.0 <= tone.time <= analysis.duration + 1e-3:
+            continue
+        shown = tone.midi
+        while shown < lo:
+            shown += 12
+        while shown > hi:
+            shown -= 12
+        notes.append(KeyNote(tone.time, tone.duration, tone.midi, shown, tone.source, tone.duration))
+    _open_same_key_gaps(notes)
     white_count = sum(1 for tone in range(lo, hi + 1) if tone % 12 in WHITES)
     white_count = max(1, white_count)
     # Cap the width so a narrow melody does not become a row of slabs.
@@ -806,9 +899,36 @@ def _build_piano(width: int, height: int, analysis: Analysis, seed: int) -> Pian
         "chroma": sum(1 for note in notes if note.source == "chroma"),
         "median_beat_gap_ms": round(beat_gap * 1000.0, 1),
     }
+    scene._energy = section_at(analysis.sections, 0.0).energy
     scene._cam_zoom = scene._target_zoom(0.0)
     scene.cam_zoom = scene._cam_zoom
     return scene
+
+
+def _open_same_key_gaps(notes: list[KeyNote]) -> None:
+    """Shorten each tail so the next note on that key has air in front of it.
+
+    The onset stays put. `duration` stays the musical length; `span` is what is drawn.
+    """
+    groups: dict[int, list[KeyNote]] = {}
+    for note in notes:
+        groups.setdefault(note.display, []).append(note)
+    for group in groups.values():
+        group.sort(key=lambda note: (note.time, -note.duration))
+        for index, note in enumerate(group[:-1]):
+            interval = group[index + 1].time - note.time
+            if interval <= 0.03:
+                note.span = 0.0
+                continue
+            gap = min(0.05, interval * 0.36)
+            note.span = min(note.duration, max(0.0, interval - gap))
+        group[-1].span = group[-1].duration
+
+
+def _note_rgb(note: KeyNote, energy: float) -> tuple[float, float, float]:
+    base = NOTE_COLORS[note.midi % 12]
+    lift = 0.05 + 0.1 * energy
+    return tuple(min(1.0, channel + (1.0 - channel) * lift) for channel in base)
 
 
 def _paint_piano(ctx, scene: PianoScene) -> None:
@@ -819,52 +939,112 @@ def _paint_piano(ctx, scene: PianoScene) -> None:
     gradient.add_color_stop_rgb(1, *pal.bg_bottom)
     ctx.set_source(gradient)
     ctx.paint()
+    # Glows have to composite over the sky. Source mode would punch them out as dark discs.
+    ctx.set_operator(cairo.OPERATOR_OVER)
     ctx.save()
     ctx.translate(width / 2.0, scene.key_top)
+    ctx.translate(scene.cam_x, scene.keyboard_dip)
     ctx.scale(scene.cam_zoom, scene.cam_zoom)
     ctx.translate(-width / 2.0, -scene.key_top)
-    # Faint lanes so a falling note has a road down to its key.
+    wash = 0.045 + 0.07 * scene._energy + 0.055 * scene.beat_level
+    glow = cairo.RadialGradient(width * 0.5, scene.key_top, 30, width * 0.5, scene.key_top * 0.55, width * 0.62)
+    glow.add_color_stop_rgba(0.0, pal.accent[0], pal.accent[1], pal.accent[2], wash)
+    glow.add_color_stop_rgba(1.0, pal.accent[0], pal.accent[1], pal.accent[2], 0.0)
+    ctx.set_source(glow)
+    ctx.rectangle(0, 0, width, scene.key_top + 8)
+    ctx.fill()
     ctx.set_line_width(1)
+    lane = 0.028 + 0.02 * scene.beat_level
     for tone in range(scene.lo, scene.hi + 1):
         if tone % 12 not in WHITES:
             continue
         x = scene.key_left + scene._whites_before(tone) * scene.key_w + scene.key_w * 0.5
-        ctx.set_source_rgba(*pal.accent2, 0.035)
+        ctx.set_source_rgba(*pal.accent2, lane)
         ctx.move_to(x, 0)
         ctx.line_to(x, scene.key_top)
         ctx.stroke()
-    speed = (scene.key_top * 0.92) / scene.lead
-    for note in scene.notes:
-        color = NOTE_COLORS[note.midi % 12]
-        front_x, front_y = scene.note_head(note)
-        if scene.time < note.time:
-            tail = note.duration * speed
-            top = front_y - tail
-            bottom = front_y
-        else:
-            remain = note.time + note.duration - scene.time
-            if remain <= 0.0:
-                continue
-            top = scene.key_top - remain * speed
-            bottom = scene.key_top
-        if bottom < -20 or top > height:
-            continue
-        shown = scene._clamp_midi(note.display)
-        black = shown % 12 not in WHITES
-        note_w = scene.key_w * (0.46 if black else 0.72)
-        rect_x = front_x - note_w / 2.0
-        rect_h = max(8.0, bottom - top)
-        _round_rect(ctx, rect_x, top, note_w, rect_h, min(8.0, note_w * 0.4))
-        fill = cairo.LinearGradient(0, top, 0, bottom)
-        fill.add_color_stop_rgba(0, *color, 0.12)
-        fill.add_color_stop_rgba(0.72, *color, 0.82)
-        fill.add_color_stop_rgba(1, *color, 1.0)
-        ctx.set_source(fill)
-        ctx.fill()
+    _paint_falling_notes(ctx, scene)
     _paint_key_columns(ctx, scene)
     _paint_keyboard(ctx, scene, pal)
     _paint_key_sparks(ctx, scene)
     ctx.restore()
+
+
+def _paint_falling_notes(ctx, scene: PianoScene) -> None:
+    """Pills, back to front, each one kept inside its own slot on the key."""
+    visible: list[tuple[float, float, int, KeyNote, float, float]] = []
+    for index, note in enumerate(scene.notes):
+        if note.span <= 0.02:
+            continue
+        top, bottom = scene.note_bounds(note)
+        if bottom - top < 1.2 or bottom < -24 or top > scene.key_top + 6:
+            continue
+        visible.append((bottom, note.time, index, note, top, bottom))
+    visible.sort()
+    for _, _, _, note, top, bottom in visible:
+        _paint_note_pill(ctx, scene, note, top, bottom)
+
+
+def _paint_note_pill(ctx, scene: PianoScene, note: KeyNote, top: float, bottom: float) -> None:
+    color = _note_rgb(note, scene._energy)
+    x, _ = scene.note_head(note)
+    shown = scene._clamp_midi(note.display)
+    black = shown % 12 not in WHITES
+    # Narrow enough that a black pill and its white neighbours do not touch.
+    note_w = scene.key_w * (0.36 if black else 0.52)
+    height = bottom - top
+    remain = note.time - scene.time
+    if remain > 0.0:
+        near = _smooth(1.0 - min(1.0, remain / 0.32))
+        hot = 0.8 + 0.2 * near
+    else:
+        hot = 1.0 + 0.28 * _pulse(scene.time - note.time, 0.03, 0.11)
+    hot *= 1.0 + 0.14 * scene.beat_level * (0.45 + 0.55 * scene._energy)
+    rect_x = x - note_w / 2.0
+    radius = note_w * 0.5
+    # Soft halo, kept close so it does not spill into the next note or the next key.
+    halo = 5.0
+    _round_rect(ctx, rect_x - halo * 0.5, top - 2.0, note_w + halo, height + 4.0, radius)
+    ctx.set_source_rgba(color[0], color[1], color[2], 0.16 * min(hot, 1.35))
+    ctx.fill()
+    _round_rect(ctx, rect_x, top, note_w, height, radius)
+    fill = cairo.LinearGradient(0, top, 0, bottom)
+    fill.add_color_stop_rgba(0.0, color[0], color[1], color[2], 0.28 * hot)
+    fill.add_color_stop_rgba(0.45, color[0], color[1], color[2], 0.9 * min(hot, 1.0))
+    fill.add_color_stop_rgba(1.0, min(1, color[0] + 0.18), min(1, color[1] + 0.16), min(1, color[2] + 0.12), min(1.0, hot))
+    ctx.set_source(fill)
+    ctx.fill()
+    if height > note_w * 0.9:
+        inset = 2.2
+        shine_h = min(height * 0.42, note_w * 1.3)
+        _round_rect(ctx, rect_x + inset, bottom - shine_h, note_w - inset * 2, shine_h - 1.5, max(1.0, radius - inset))
+        ctx.set_source_rgba(1.0, 0.98, 0.96, 0.22 * min(hot, 1.1))
+        ctx.fill()
+    _paint_note_sparkles(ctx, scene, note, x, bottom, note_w, color, hot)
+
+
+def _paint_note_sparkles(ctx, scene, note: KeyNote, x: float, head_y: float, note_w: float, color, hot: float) -> None:
+    """A few specks drifting off the head. They stay inside the lane and fade quickly."""
+    if head_y < -10 or head_y > scene.key_top + 4:
+        return
+    for index in range(3):
+        period = 0.34
+        local = (scene.time - note.time + 0.2 + index * 0.11) % period
+        life = 0.26
+        if local >= life:
+            continue
+        u = local / life
+        fade = _smooth(1.0 - u) * _smooth(min(1.0, local / 0.05)) * min(hot, 1.2)
+        if fade < 0.04:
+            continue
+        side = (index - 1) * note_w * 0.42 * u
+        rise = 6.0 + 16.0 * u
+        ctx.set_source_rgba(1.0, 0.98, 0.95, 0.75 * fade)
+        ctx.arc(x + side, head_y - rise, 1.35, 0, math.tau)
+        ctx.fill()
+        ctx.set_source_rgba(*color, 0.45 * fade)
+        ctx.arc(x + side, head_y - rise, 2.4, 0, math.tau)
+        ctx.fill()
 
 
 def _press_level(scene: PianoScene) -> dict[int, float]:
@@ -911,40 +1091,41 @@ def _paint_key_columns(ctx, scene: PianoScene) -> None:
 
 
 def _paint_key_sparks(ctx, scene: PianoScene) -> None:
-    """Burst drawn after the keys. Streaks, not dots: a short bright dot blooms into a ball."""
+    """Impact after the keys: a flash on the key, one shockwave, and a few streaks."""
     for note in scene.notes:
         age = scene.time - note.time
-        if age < 0.0 or age > 0.5:
+        if age < 0.0 or age > 0.46:
             continue
-        color = NOTE_COLORS[note.midi % 12]
+        color = _note_rgb(note, scene._energy)
         x, key_y = scene.key_center(note.display)
-        fade = 1.0 - age / 0.5
-        splash = cairo.LinearGradient(x - 70, key_y, x + 70, key_y)
+        fade = _smooth(1.0 - age / 0.46)
+        half = scene.key_w * 0.62
+        splash = cairo.LinearGradient(x - half, key_y, x + half, key_y)
         splash.add_color_stop_rgba(0.0, *color, 0.0)
-        splash.add_color_stop_rgba(0.5, 1.0, 0.98, 0.95, 0.85 * fade)
+        splash.add_color_stop_rgba(0.5, 1.0, 0.98, 0.95, 0.9 * fade)
         splash.add_color_stop_rgba(1.0, *color, 0.0)
         ctx.set_source(splash)
-        ctx.rectangle(x - 70, key_y - 8, 140, 10)
+        ctx.rectangle(x - half, key_y - 7, half * 2, 9)
         ctx.fill()
-        ring = min(1.0, age / 0.36)
-        ctx.set_source_rgba(*color, fade * 0.95)
-        ctx.set_line_width(7.0 * fade + 2.0)
-        ctx.arc(x, key_y + 4.0, 28.0 + ring * 86.0, math.pi * 1.08, math.pi * 1.92)
+        ring = _smooth(min(1.0, age / 0.32))
+        ctx.set_source_rgba(*color, fade * 0.9)
+        ctx.set_line_width(3.2 * fade + 1.4)
+        ctx.arc(x, key_y + 2.0, 22.0 + ring * 78.0, math.pi * 1.08, math.pi * 1.92)
         ctx.stroke()
-        for spark in range(13):
-            angle = math.pi * 1.02 + spark * (math.pi * 0.96 / 12.0)
-            dist = 46.0 + age * (320.0 + spark * 18.0)
+        for spark in range(8):
+            angle = math.pi * 1.05 + spark * (math.pi * 0.9 / 7.0)
+            dist = 46.0 + age * (280.0 + spark * 16.0)
             x2 = x + math.cos(angle) * dist
             y2 = key_y + math.sin(angle) * dist
-            x1 = x + math.cos(angle) * (dist - 22.0)
-            y1 = key_y + math.sin(angle) * (dist - 22.0)
-            ctx.set_source_rgba(1.0, 0.98, 0.95, fade)
-            ctx.set_line_width(2.6 * fade + 0.8)
+            x1 = x + math.cos(angle) * (dist - 18.0)
+            y1 = key_y + math.sin(angle) * (dist - 18.0)
+            ctx.set_source_rgba(*color, fade * 0.85)
+            ctx.set_line_width(3.4 * fade + 0.6)
             ctx.move_to(x1, y1)
             ctx.line_to(x2, y2)
             ctx.stroke()
-            ctx.set_source_rgba(*color, fade * 0.8)
-            ctx.set_line_width(5.0 * fade)
+            ctx.set_source_rgba(1.0, 0.98, 0.95, fade * 0.9)
+            ctx.set_line_width(1.4 * fade + 0.4)
             ctx.move_to(x1, y1)
             ctx.line_to(x2, y2)
             ctx.stroke()

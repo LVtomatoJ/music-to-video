@@ -260,6 +260,8 @@ class PipelineTest(unittest.TestCase):
             self.assertTrue(any(abs(beat - when) < 1e-6 for when in answered), beat)
         for building in city.buildings:
             self.assertAlmostEqual(city.building_height(building, building.born), building.target, places=4)
+            self.assertGreater(city.building_height(building, building.born + 0.16), building.target)
+            self.assertAlmostEqual(city.building_height(building, building.born + 0.4), building.target, places=3)
             self.assertEqual(city.building_height(building, building.born - building.grow - 0.05), 0.0)
         calm = [building.target for building in city.buildings if building.energy <= 0.35]
         hot = [building.target for building in city.buildings if building.energy >= 0.55]
@@ -279,6 +281,10 @@ class PipelineTest(unittest.TestCase):
             self.assertAlmostEqual(x, kx, places=4)
             self.assertAlmostEqual(y, ky, places=4)
             self.assertGreaterEqual(note.duration, 0.12)
+        overlaps, worst_gap, checked = _same_key_gaps(piano)
+        self.assertEqual(overlaps, 0)
+        self.assertGreater(checked, 0)
+        self.assertGreaterEqual(worst_gap, 3.0)
         self.assertEqual(piano.timing["max_timing_error_s"], 0.0)
         self.assertLess(piano.timing["max_position_error_px"], 1e-4)
 
@@ -348,6 +354,45 @@ def _assert_box_margin(city, building, risen: float) -> None:
             f"building x={building.x:.1f} vertical margin {top:.1f}..{bottom:.1f} "
             f"on {city.height:.0f} at t={city.time:.3f}"
         )
+
+
+def _same_key_gaps(scene, step: float = 1.0 / 30.0) -> tuple[int, float, int]:
+    """Return overlap count, the smallest positive gap in pixels, and pairs checked."""
+    groups: dict[int, list] = {}
+    for note in scene.notes:
+        groups.setdefault(note.display, []).append(note)
+    overlaps = 0
+    worst = 1e9
+    checked = 0
+    time = 0.0
+    while time <= scene.duration + 1e-6:
+        scene.time = time
+        for group in groups.values():
+            boxes = []
+            for note in group:
+                if note.span <= 0.02:
+                    continue
+                top, bottom = scene.note_bounds(note)
+                if bottom - top < 1.2:
+                    continue
+                boxes.append((top, bottom))
+            for index, (top, bottom) in enumerate(boxes):
+                for other_top, other_bottom in boxes[index + 1 :]:
+                    if bottom <= other_top:
+                        gap = other_top - bottom
+                    elif other_bottom <= top:
+                        gap = top - other_bottom
+                    else:
+                        gap = -min(bottom, other_bottom) + max(top, other_top)
+                    checked += 1
+                    if gap < 3.0:
+                        overlaps += 1
+                    else:
+                        worst = min(worst, gap)
+        time += step
+    if worst > 1e8:
+        worst = 0.0
+    return overlaps, worst, checked
 
 
 def _segments_cross(a, b, c, d) -> bool:
