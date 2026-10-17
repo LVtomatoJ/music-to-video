@@ -11,6 +11,7 @@ import math
 from dataclasses import dataclass
 
 import cairo
+import numpy as np
 
 from music2video.analysis import Analysis, section_at
 from music2video.notes import Tone, extract_tones
@@ -1289,28 +1290,29 @@ def _star_tint(warmth: float) -> tuple[float, float, float]:
 
 
 def _paint_star_glyph(ctx, x: float, y: float, level: float, warmth: float, phase: float, time: float, scale: float = 1.0) -> None:
-    """Soft core, with short spikes that fade out. Size and warmth come from the star."""
-    twinkle = 0.86 + 0.14 * math.sin(time * 2.1 + phase)
+    """A bright core with a wide soft glow. Spikes stay short and fade."""
+    twinkle = 0.9 + 0.1 * math.sin(time * 2.1 + phase)
     tint = _star_tint(warmth)
-    spike = (6.0 + 8.0 * level) * (0.65 + 0.55 * scale) * twinkle
-    core = (2.2 + 4.8 * scale) * (0.75 + 0.25 * level)
-    glow = cairo.RadialGradient(x, y, 0.2, x, y, core * 2.4)
-    glow.add_color_stop_rgba(0, 1, 1, 1, 0.9 * level * twinkle)
-    glow.add_color_stop_rgba(0.28, tint[0], tint[1], tint[2], 0.45 * level)
+    spike = (9.0 + 10.0 * level) * (0.75 + 0.45 * scale) * twinkle
+    glow_r = (10.0 + 16.0 * scale) * (0.65 + 0.35 * level)
+    glow = cairo.RadialGradient(x, y, 0.4, x, y, glow_r)
+    glow.add_color_stop_rgba(0, 1, 1, 1, min(1.0, 0.95 * level * twinkle))
+    glow.add_color_stop_rgba(0.22, tint[0], tint[1], tint[2], 0.72 * level * twinkle)
+    glow.add_color_stop_rgba(0.55, tint[0], tint[1], tint[2], 0.22 * level)
     glow.add_color_stop_rgba(1, tint[0], tint[1], tint[2], 0.0)
     ctx.set_source(glow)
-    ctx.arc(x, y, core * 2.4, 0, math.tau)
+    ctx.arc(x, y, glow_r, 0, math.tau)
     ctx.fill()
     ctx.set_line_cap(cairo.LINE_CAP_ROUND)
     angles = (0.0, math.pi / 2.0, math.pi, 3.0 * math.pi / 2.0)
     for index, angle in enumerate(angles):
-        length = spike * (1.15 if index % 2 else 0.82)
-        _fading_spike(ctx, x, y, angle, length, 1.15 * (0.7 + 0.4 * scale), tint, 0.75 * level * twinkle)
-    diag = spike * 0.38
+        length = spike * (1.12 if index % 2 else 0.84)
+        _fading_spike(ctx, x, y, angle, length, 1.35 * (0.75 + 0.35 * scale), tint, 0.9 * level * twinkle)
+    diag = spike * 0.36
     for angle in (math.pi / 4.0, 3.0 * math.pi / 4.0, 5.0 * math.pi / 4.0, 7.0 * math.pi / 4.0):
-        _fading_spike(ctx, x, y, angle, diag, 0.8, (1.0, 0.98, 0.95), 0.35 * level * twinkle)
-    ctx.set_source_rgba(1, 1, 1, min(1.0, 0.95 * level))
-    ctx.arc(x, y, 1.15 * (0.6 + scale * 0.5), 0, math.tau)
+        _fading_spike(ctx, x, y, angle, diag, 0.9, (1.0, 0.98, 0.96), 0.45 * level * twinkle)
+    ctx.set_source_rgba(1, 1, 1, min(1.0, level * twinkle))
+    ctx.arc(x, y, 1.6 + scale, 0, math.tau)
     ctx.fill()
 
 
@@ -1330,6 +1332,83 @@ def _fading_spike(ctx, x: float, y: float, angle: float, length: float, width: f
     ctx.stroke()
 
 
+def _blur_rgba(surface, radius: int) -> None:
+    """Separable box blur, twice, which reads as a soft gaussian on a glow layer."""
+    if radius < 1:
+        return
+    surface.flush()
+    height, width = surface.get_height(), surface.get_width()
+    buf = np.ndarray((height, width, 4), dtype=np.uint8, buffer=surface.get_data())
+    image = buf.astype(np.float32)
+    for _ in range(2):
+        window = radius * 2 + 1
+        for axis in (1, 0):
+            pad = [(0, 0), (0, 0), (0, 0)]
+            pad[axis] = (radius, radius)
+            padded = np.pad(image, pad, mode="edge")
+            cumulative = np.cumsum(padded, axis=axis, dtype=np.float32)
+            shape = list(cumulative.shape)
+            shape[axis] = 1
+            cumulative = np.concatenate([np.zeros(shape, dtype=np.float32), cumulative], axis=axis)
+            high = [slice(None), slice(None), slice(None)]
+            low = [slice(None), slice(None), slice(None)]
+            high[axis] = slice(window, window + image.shape[axis])
+            low[axis] = slice(0, image.shape[axis])
+            image = (cumulative[tuple(high)] - cumulative[tuple(low)]) / window
+    np.clip(image, 0, 255, out=image)
+    buf[:] = image.astype(np.uint8)
+    surface.mark_dirty()
+
+
+def _paint_luminous_sky(ctx, width: float, height: float) -> None:
+    """Milky way and nebulae added on top of the sky. They can only lighten it.
+
+    The frame is painted with OPERATOR_SOURCE, so a translucent fill would replace
+    the sky with a dark premultiplied color. This layer is blurred, then added.
+    """
+    glow_w = max(8, int(width) // 4)
+    glow_h = max(8, int(height) // 4)
+    surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, glow_w, glow_h)
+    glow = cairo.Context(surface)
+    glow.set_operator(cairo.OPERATOR_SOURCE)
+    glow.set_source_rgba(0, 0, 0, 0)
+    glow.paint()
+    glow.set_operator(cairo.OPERATOR_OVER)
+    glow.scale(glow_w / width, glow_h / height)
+    glow.save()
+    glow.translate(width * 0.56, height * 0.42)
+    glow.rotate(-0.26)
+    band = cairo.LinearGradient(0, -260, 0, 260)
+    band.add_color_stop_rgba(0.0, 0.72, 0.68, 0.95, 0.0)
+    band.add_color_stop_rgba(0.5, 0.88, 0.84, 1.0, 0.9)
+    band.add_color_stop_rgba(1.0, 0.65, 0.6, 0.92, 0.0)
+    glow.set_source(band)
+    glow.rectangle(-width * 1.4, -280, width * 2.8, 560)
+    glow.fill()
+    glow.restore()
+    for ox, oy, radius, tint, alpha in (
+        (width * 0.3, height * 0.34, 420.0, (0.72, 0.62, 1.0), 0.55),
+        (width * 0.68, height * 0.5, 480.0, (0.62, 0.74, 1.0), 0.42),
+        (width * 0.48, height * 0.24, 300.0, (1.0, 0.86, 0.72), 0.28),
+    ):
+        blob = cairo.RadialGradient(ox, oy, radius * 0.02, ox, oy, radius)
+        blob.add_color_stop_rgba(0.0, tint[0], tint[1], tint[2], alpha)
+        blob.add_color_stop_rgba(0.45, tint[0], tint[1], tint[2], alpha * 0.4)
+        blob.add_color_stop_rgba(1.0, tint[0], tint[1], tint[2], 0.0)
+        glow.set_source(blob)
+        glow.rectangle(ox - radius, oy - radius, radius * 2, radius * 2)
+        glow.fill()
+    _blur_rgba(surface, 6)
+    ctx.save()
+    ctx.set_operator(cairo.OPERATOR_ADD)
+    pattern = cairo.SurfacePattern(surface)
+    pattern.set_filter(cairo.FILTER_BILINEAR)
+    pattern.set_matrix(cairo.Matrix(xx=glow_w / float(width), yy=glow_h / float(height)))
+    ctx.set_source(pattern)
+    ctx.paint_with_alpha(0.42)
+    ctx.restore()
+
+
 def _paint_stars(ctx, scene: StarScene) -> None:
     width, height = scene.width, scene.height
     gradient = cairo.LinearGradient(0, 0, 0, height)
@@ -1337,32 +1416,13 @@ def _paint_stars(ctx, scene: StarScene) -> None:
     gradient.add_color_stop_rgb(0.34, 0.09, 0.055, 0.18)
     gradient.add_color_stop_rgb(0.66, 0.11, 0.07, 0.17)
     gradient.add_color_stop_rgb(1, 0.05, 0.04, 0.10)
+    ctx.set_operator(cairo.OPERATOR_SOURCE)
     ctx.set_source(gradient)
     ctx.paint()
-    ctx.save()
-    ctx.translate(width * 0.58, height * 0.4)
-    ctx.rotate(-0.32)
-    band = cairo.LinearGradient(0, -120, 0, 120)
-    band.add_color_stop_rgba(0, 0.28, 0.22, 0.5, 0.0)
-    band.add_color_stop_rgba(0.35, 0.45, 0.34, 0.72, 0.07)
-    band.add_color_stop_rgba(0.5, 0.82, 0.7, 0.9, 0.16)
-    band.add_color_stop_rgba(0.68, 0.4, 0.3, 0.62, 0.07)
-    band.add_color_stop_rgba(1, 0.18, 0.14, 0.32, 0.0)
-    ctx.set_source(band)
-    ctx.rectangle(-width, -130, width * 2.2, 260)
-    ctx.fill()
-    ctx.restore()
-    for ox, oy, radius, tint in (
-        (width * 0.28, height * 0.32, 280, (0.45, 0.32, 0.7)),
-        (width * 0.72, height * 0.48, 340, (0.25, 0.38, 0.62)),
-        (width * 0.5, height * 0.22, 180, (0.7, 0.5, 0.4)),
-    ):
-        blob = cairo.RadialGradient(ox, oy, 10, ox, oy, radius)
-        blob.add_color_stop_rgba(0, tint[0], tint[1], tint[2], 0.11)
-        blob.add_color_stop_rgba(1, tint[0], tint[1], tint[2], 0.0)
-        ctx.set_source(blob)
-        ctx.arc(ox, oy, radius, 0, math.tau)
-        ctx.fill()
+    # Everything after the opaque sky must blend. SOURCE would punch dark holes.
+    ctx.set_operator(cairo.OPERATOR_OVER)
+    _paint_luminous_sky(ctx, width, height)
+    ctx.set_operator(cairo.OPERATOR_OVER)
     ctx.save()
     ctx.translate(width / 2.0, height / 2.0)
     ctx.scale(scene.cam_zoom, scene.cam_zoom)
@@ -1387,12 +1447,12 @@ def _paint_stars(ctx, scene: StarScene) -> None:
             continue
         appear = _smooth(min(1.0, age / 0.45))
         if age < 5.0:
-            alpha = appear * 0.42
+            alpha = appear * 0.72
         else:
-            alpha = max(0.1, 0.42 * _smooth(1.0 - (age - 5.0) / 7.0))
+            alpha = max(0.16, 0.72 * _smooth(1.0 - (age - 5.0) / 7.0))
         tint = _star_tint((a.warmth + b.warmth) * 0.5)
         ctx.set_source_rgba(tint[0], tint[1], tint[2], alpha)
-        ctx.set_line_width(1.05)
+        ctx.set_line_width(1.55)
         ctx.move_to(a.x, a.y)
         ctx.line_to(b.x, b.y)
         ctx.stroke()
