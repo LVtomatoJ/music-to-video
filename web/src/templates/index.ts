@@ -1,6 +1,5 @@
 import type { MusicData } from "../music";
 import type { ParamSpec, ParamValues, ParamsOf, TemplateContext, TemplateDefinition, TemplateMeta } from "../template";
-import { ballsTemplate } from "./balls";
 import { cityTemplate } from "./city";
 import { mapTemplate } from "./map";
 import { pianoTemplate } from "./piano";
@@ -34,5 +33,4 @@ export const templates: RunnableTemplate[] = [
   adapt(pianoTemplate),
   adapt(starsTemplate),
   adapt(mapTemplate),
-  adapt(ballsTemplate),
 ];

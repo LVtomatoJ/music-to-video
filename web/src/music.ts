@@ -199,6 +199,10 @@ async function analyzeSamples(
   }
 
   const times = Array.from({ length: nFrames }, (_, i) => i / frameRate);
+  const rawLevel = normalize(rms);
+  for (let i = 0; i < nFrames; i++) {
+    if (rawLevel[i] < 0.07) pitchMidi[i] = -1;
+  }
   const loudness = normalize(smoothSeries(rms, frameRate, 1.2));
   const bands = {
     times,
@@ -220,7 +224,7 @@ async function analyzeSamples(
   const onsets = pickOnsets(novelty, frameRate, duration);
   const sections = buildSections(times, loudness, duration);
   const chromaValues = foldChroma(chromaRaw, nFrames);
-  const tones = buildTones(pitchMidi, frameRate, duration, beats, chromaValues, times, onsets);
+  const tones = buildTones(pitchMidi, frameRate, duration, beats, chromaValues, times, onsets, loudness);
   return {
     version: MUSIC_DATA_VERSION,
     duration,
@@ -262,6 +266,7 @@ function buildTones(
   chroma: number[][],
   times: number[],
   onsets: Onset[],
+  loudness: Float32Array,
 ): ToneEvent[] {
   const notes: ToneEvent[] = [];
   let index = 0;
@@ -302,7 +307,9 @@ function buildTones(
   const period = beats.length > 2 ? medianGap(beats) : 0.5;
   for (const beat of beats) {
     if (beat < 0 || beat > duration) continue;
+    if (!frameHasSound(loudness, times, onsets, beat)) continue;
     const column = chroma[chromaIndex(times, beat)] ?? new Array(12).fill(0);
+    if (Math.max(...column) <= 1e-4) continue;
     let pc = 0;
     let best = -1;
     for (let i = 0; i < 12; i++) {
@@ -319,6 +326,22 @@ function buildTones(
     });
   }
   return dedupeTones(fallback);
+}
+
+function frameHasSound(loudness: ArrayLike<number>, times: number[], onsets: Onset[], time: number, window = 0.18): boolean {
+  if (interp(times, loudness, time) < 0.08) return false;
+  let lo = 0;
+  let hi = onsets.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (onsets[mid].time < time - window) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo < onsets.length && onsets[lo].time <= time + window;
+}
+
+export function soundAt(music: MusicData, time: number, window = 0.18): boolean {
+  return frameHasSound(music.loudness.values, music.loudness.times, music.onsets, time, window);
 }
 
 function chromaIndex(times: number[], time: number): number {

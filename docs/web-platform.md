@@ -199,8 +199,7 @@ CLI 打开本地无头浏览器，跑同一个 `render`。服务器不碰音频�
 | `city` | `city` | 2D | 拍、重拍、低音、段落 | 楼的生长和镜头曲线在 `setup` |
 | `stars` | `stars` | 2D | `tones`、段落 | 星座在 `setup` 里弯折、不相交，亮过之后让出位置 |
 | `piano` | `piano` | 2D | 拍、重拍、`tones`、`chroma` | 和声、低音、琶音在 `setup` 里排开，同一琴键不重叠 |
-| `map` | `map` | 2D | 拍、段落、种子 | 疏朗螺旋和镜头在 `setup`。皮肤：霓虹、粉彩、街机 |
-| `balls` | `balls` | 2D | 拍、重拍、种子 | 轨迹在 `setup` 里积分。皮肤：霓虹、粉彩 |
+| `map` | `map` | 2D | 拍、段落、种子 | 折线弹射和镜头在 `setup`。皮肤：霓虹、粉彩、街机 |
 
 Python 里那些“跟上一帧弹簧”的镜头，迁的时候都改成 `setup` 里积好的曲线，否则网页预览没法随意拖动。
 
@@ -208,7 +207,7 @@ Python 里那些“跟上一帧弹簧”的镜头，迁的时候都改成 `setup
 
 1. **现在。** 浏览器分析、`MusicData`、模板 API、参数面板、可拖动的预览、雨夜、本地 mp4。见 `web/`。
 2. **CLI。** `m2v preview`，和网页用同一份渲染，方便人和代理看关键帧。
-3. **已迁。** city、piano、stars、map、balls 和雨夜用同一套 `defineTemplate`。音高仍是频谱峰值加色度，不是 pyin。
+3. **已迁。** city、piano、stars、map 和雨夜用同一套 `defineTemplate`。音高仍是频谱峰值加色度，不是 pyin。网页里不再放多球。
 4. **沙箱。** 用户模板进 Worker / iframe。
 5. **市场。** Workers + R2 + D1，上传校验和举报。
 6. **MCP。** 只暴露读规范、看例子、校验、发布。

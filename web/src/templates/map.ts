@@ -103,29 +103,55 @@ function buildMap(width: number, height: number, music: MusicData, skinName: str
   const scale = width / 1600;
   const beats = music.beats.length ? music.beats.slice() : [0.4];
   const hits: Hit[] = [];
-  let theta = rng() * TAU;
-  let radius = 70 * scale;
-  let x = Math.cos(theta) * radius;
-  let y = Math.sin(theta) * radius;
+  let x = 0;
+  let y = 0;
+  let lane = (rng() * 2 - 1) * Math.PI;
+  let side = rng() < 0.5 ? 1 : -1;
+  let heading = lane + side * 0.55;
+  let rowLen = 2;
+  let rowLeft = rowLen;
+  let turns = 0;
+  let stepOut = false;
   beats.forEach((time, index) => {
     const energy = sectionAt(music, time).energy;
-    const step = (energy >= 0.62 ? 214 : 248) * scale;
-    const heading = theta + Math.PI / 2;
+    let step = (energy >= 0.62 ? 168 : 214) * scale;
+    if (stepOut) {
+      step *= 1.45;
+      stepOut = false;
+    }
+    const hitX = x + Math.cos(heading) * step;
+    const hitY = y + Math.sin(heading) * step;
+    rowLeft -= 1;
+    const wantTurn = rowLeft <= 0;
+    let nextLane = lane;
+    let nextSide = -side;
+    let nextSpread = energy >= 0.62 ? 0.5 : 0.36;
+    if (wantTurn) {
+      nextLane = lane + Math.PI / 2;
+      turns += 1;
+      if (turns % 2 === 0) rowLen = Math.min(4, rowLen + 1);
+      rowLeft = rowLen;
+      nextSide = side;
+      nextSpread = 0.16;
+      stepOut = true;
+    }
+    const departure = nextLane + nextSide * nextSpread;
     hits.push({
       time,
-      x,
-      y,
-      heading,
-      kind: index % 3 === 2 ? "bar" : "peg",
-      side: index % 2 === 0 ? 1 : -1,
+      x: hitX,
+      y: hitY,
+      heading: departure,
+      kind: wantTurn || index % 4 === 0 ? "bar" : "peg",
+      side: nextSide,
     });
-    theta += step / Math.max(radius, 48 * scale);
-    radius += step * 0.2;
-    x = Math.cos(theta) * radius;
-    y = Math.sin(theta) * radius;
+    x = hitX;
+    y = hitY;
+    lane = nextLane;
+    side = nextSide;
+    heading = departure;
   });
   const skin = SKINS[skinName] ?? SKINS.neon;
-  const ballR = 22 * scale;
+  const ballR = 26 * scale;
   const camera = bakeCamera(width, height, hits, beats, music.duration, scale, ballR);
   return {
     width,
@@ -136,7 +162,7 @@ function buildMap(width: number, height: number, music: MusicData, skinName: str
     skin,
     light: skinName === "pastel",
     ballR,
-    pegR: 16 * scale,
+    pegR: 20 * scale,
     camX: camera.x,
     camY: camera.y,
     camZ: camera.z,
@@ -167,16 +193,26 @@ function position(hits: Hit[], time: number): { x: number; y: number; heading: n
 
 function cameraTarget(width: number, height: number, hits: Hit[], time: number, scale: number): [number, number, number] {
   const ball = position(hits, time);
-  const back = position(hits, time - 1.15);
-  const ahead = position(hits, time + 0.7);
-  const focusX = back.x * 0.2 + ball.x * 0.5 + ahead.x * 0.3;
-  const focusY = back.y * 0.2 + ball.y * 0.5 + ahead.y * 0.3;
-  const span = Math.max(
-    Math.hypot(ahead.x - back.x, ahead.y - back.y),
-    420 * scale,
-  );
-  const zoom = clamp((Math.min(width, height) * 0.72) / span, 0.92, 1.35);
-  return [focusX, focusY, zoom];
+  const ahead = position(hits, time + 0.55);
+  let minX = Math.min(ball.x, ahead.x);
+  let maxX = Math.max(ball.x, ahead.x);
+  let minY = Math.min(ball.y, ahead.y);
+  let maxY = Math.max(ball.y, ahead.y);
+  let count = 0;
+  for (const hit of hits) {
+    if (hit.time < time - 12 || hit.time > time + 0.8) continue;
+    minX = Math.min(minX, hit.x);
+    maxX = Math.max(maxX, hit.x);
+    minY = Math.min(minY, hit.y);
+    maxY = Math.max(maxY, hit.y);
+    count += 1;
+  }
+  const span = Math.max(maxX - minX, maxY - minY, 480 * scale);
+  const zoom = clamp((Math.min(width, height) * 0.84) / (span * 1.18), 0.4, 1.05);
+  const midX = (minX + maxX) / 2;
+  const midY = (minY + maxY) / 2;
+  const lead = count > 4 ? 0.22 : 0.4;
+  return [midX * (1 - lead) + ahead.x * lead, midY * (1 - lead) + ahead.y * lead, zoom];
 }
 
 function bakeCamera(width: number, height: number, hits: Hit[], beats: number[], duration: number, scale: number, ballR: number) {
@@ -248,10 +284,7 @@ function paintMap(
   paintPath(ctx, state, time);
   for (const hit of state.hits) {
     const age = time - hit.time;
-    if (age < -0.7 || age > 10) continue;
-    const dx = hit.x - camX;
-    const dy = hit.y - camY;
-    if (dx * dx + dy * dy > (780 * state.scale) ** 2) continue;
+    if (age < -0.45 || age > 12.4) continue;
     paintObstacle(ctx, state, hit, age, pulse);
   }
   paintTrail(ctx, state, time);
@@ -264,27 +297,32 @@ function paintMap(
 }
 
 function paintPath(ctx: CanvasRenderingContext2D, state: MapState, time: number): void {
-  ctx.beginPath();
-  let started = false;
+  const points: { x: number; y: number; time: number }[] = [];
   for (const hit of state.hits) {
-    if (hit.time < time - 2.4) continue;
-    if (hit.time > time + 0.75) break;
-    if (!started) {
-      ctx.moveTo(hit.x, hit.y);
-      started = true;
-    } else ctx.lineTo(hit.x, hit.y);
+    if (hit.time < time - 12) continue;
+    if (hit.time > time) break;
+    points.push(hit);
   }
   const live = position(state.hits, time);
-  if (!started) return;
-  ctx.lineTo(live.x, live.y);
+  points.push({ x: live.x, y: live.y, time });
+  if (points.length < 2) return;
   ctx.lineCap = "round";
   ctx.lineJoin = "round";
-  ctx.strokeStyle = rgba(state.skin.ball[0], state.skin.ball[1], state.skin.ball[2], state.light ? 0.28 : 0.42);
-  ctx.lineWidth = 18 * state.scale;
-  ctx.stroke();
-  ctx.strokeStyle = rgba(1, 1, 1, state.light ? 0.45 : 0.85);
-  ctx.lineWidth = 3.2 * state.scale;
-  ctx.stroke();
+  for (let index = 1; index < points.length; index++) {
+    const a = points[index - 1];
+    const b = points[index];
+    const age = time - b.time;
+    const fade = clamp(1 - age / 12, 0.14, 1);
+    ctx.beginPath();
+    ctx.moveTo(a.x, a.y);
+    ctx.lineTo(b.x, b.y);
+    ctx.strokeStyle = rgba(state.skin.ball[0], state.skin.ball[1], state.skin.ball[2], (state.light ? 0.28 : 0.55) * fade);
+    ctx.lineWidth = 22 * state.scale;
+    ctx.stroke();
+    ctx.strokeStyle = rgba(1, 1, 1, (state.light ? 0.35 : 0.92) * fade);
+    ctx.lineWidth = 4.2 * state.scale;
+    ctx.stroke();
+  }
 }
 
 function paintObstacle(ctx: CanvasRenderingContext2D, state: MapState, hit: Hit, age: number, pulse: number): void {
@@ -294,7 +332,7 @@ function paintObstacle(ctx: CanvasRenderingContext2D, state: MapState, hit: Hit,
   const x = hit.x + normalX * gap;
   const y = hit.y + normalY * gap;
   const born = age < 0 ? 0.45 * smoothstep(1 + age / 0.35) : 1;
-  const fade = age > 7.5 ? smoothstep(1 - (age - 7.5) / 2.5) : 1;
+  const fade = age > 10.2 ? smoothstep(1 - (age - 10.2) / 2.2) : 1;
   const flash = age >= 0 && age < 0.28 ? 1 - age / 0.28 : 0;
   const alpha = born * fade;
   if (alpha <= 0.02) return;
@@ -315,7 +353,7 @@ function paintObstacle(ctx: CanvasRenderingContext2D, state: MapState, hit: Hit,
     ctx.lineWidth = 2.2 * state.scale;
     ctx.stroke();
   } else {
-    const length = 108 * state.scale;
+    const length = 78 * state.scale;
     const thick = 14 * state.scale;
     ctx.save();
     ctx.translate(x, y);
@@ -362,6 +400,13 @@ function paintRings(ctx: CanvasRenderingContext2D, state: MapState, time: number
 
 function paintBall(ctx: CanvasRenderingContext2D, state: MapState, x: number, y: number, pulse: number): void {
   const radius = state.ballR * (1 + 0.2 * pulse);
+  const halo = ctx.createRadialGradient(x, y, radius * 0.4, x, y, radius * 3.2);
+  halo.addColorStop(0, rgba(state.skin.ball[0], state.skin.ball[1], state.skin.ball[2], 0.55));
+  halo.addColorStop(1, rgba(state.skin.ball[0], state.skin.ball[1], state.skin.ball[2], 0));
+  ctx.fillStyle = halo;
+  ctx.beginPath();
+  ctx.arc(x, y, radius * 3.2, 0, TAU);
+  ctx.fill();
   ctx.fillStyle = rgba(state.skin.ball[0], state.skin.ball[1], state.skin.ball[2], 1);
   ctx.beginPath();
   ctx.arc(x, y, radius, 0, TAU);

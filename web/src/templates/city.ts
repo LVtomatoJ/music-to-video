@@ -394,8 +394,8 @@ function paintCity(
   for (let index = 0; index < state.buildings.length; index++) {
     paintBuilding(ctx, state, state.buildings[index], index, time, glow);
   }
-  paintStreet(ctx, state, time, glow, pulse);
   ctx.restore();
+  paintStreet(ctx, state, time, glow, pulse, camX, zoom, ground);
   view.post.glow = 0.72 + 0.45 * Math.max(pulse, glow * 0.65);
   view.post.grain = 0.85;
   view.post.vignette = 0.95;
@@ -550,91 +550,139 @@ function paintWindows(
   }
 }
 
-function paintStreet(ctx: CanvasRenderingContext2D, state: CityState, time: number, glow: number, pulse: number): void {
-  if (!state.buildings.length) return;
-  const unit = state.unit;
-  const left = state.buildings[0].x - 40 * unit;
-  const right = state.buildings[state.buildings.length - 1].x + state.buildings[state.buildings.length - 1].width + 40 * unit;
-  const span = Math.max(240 * unit, right - left);
-  const roadH = 92 * unit;
-  const road = ctx.createLinearGradient(0, 0, 0, roadH + 70 * unit);
-  road.addColorStop(0, rgb(0.045, 0.04, 0.05));
-  road.addColorStop(0.16, rgb(0.02, 0.02, 0.028));
-  road.addColorStop(0.55, rgb(0.012, 0.012, 0.018));
-  road.addColorStop(1, rgb(0.008, 0.008, 0.012));
+function paintStreet(
+  ctx: CanvasRenderingContext2D,
+  state: CityState,
+  time: number,
+  glow: number,
+  pulse: number,
+  camX: number,
+  zoom: number,
+  ground: number,
+): void {
+  const { width, height } = state;
+  const seam = ground - 28;
+  const road = ctx.createLinearGradient(0, seam, 0, height);
+  road.addColorStop(0, rgba(0.1, 0.06, 0.12, 0));
+  road.addColorStop(0.06, rgba(0.16, 0.1, 0.16, 0.28));
+  road.addColorStop(0.16, rgb(0.09, 0.07, 0.09));
+  road.addColorStop(0.34, rgb(0.045, 0.038, 0.05));
+  road.addColorStop(0.7, rgb(0.02, 0.018, 0.028));
+  road.addColorStop(1, rgb(0.01, 0.009, 0.016));
   ctx.fillStyle = road;
-  ctx.fillRect(left - 80 * unit, 0, span + 160 * unit, roadH + 70 * unit);
-  const curb = ctx.createLinearGradient(0, 0, 0, 10 * unit);
-  curb.addColorStop(0, rgba(1, 0.86, 0.55, 0.22 + 0.55 * pulse + 0.18 * glow));
-  curb.addColorStop(1, rgba(0.49, 0.85, 0.96, 0));
-  ctx.fillStyle = curb;
-  ctx.fillRect(left - 80 * unit, 0, span + 160 * unit, 10 * unit);
-  paintReflections(ctx, state, time, pulse);
-  ctx.fillStyle = rgba(0.75, 0.8, 0.86, 0.14);
-  const laneY = 46 * unit;
-  for (let dash = left; dash < right; dash += 86 * unit) ctx.fillRect(dash, laneY, 18 * unit, 1.6 * unit);
+  ctx.fillRect(0, seam, width, height - seam);
+  paintReflections(ctx, state, time, pulse, camX, zoom, ground);
+  ctx.strokeStyle = rgba(0.8, 0.84, 0.9, 0.16);
+  ctx.lineWidth = 1.4;
+  ctx.setLineDash([16, 28]);
+  ctx.beginPath();
+  ctx.moveTo(0, ground + (height - ground) * 0.42);
+  ctx.lineTo(width, ground + (height - ground) * 0.42);
+  ctx.stroke();
+  ctx.setLineDash([]);
   const boost = energyArea(state.sections, time);
-  paintLane(ctx, state, left, span, time, boost, 26 * unit, 1, 0, pulse);
-  paintLane(ctx, state, left, span, time, boost, 68 * unit, -1, span * 0.47, pulse);
+  const lanes = [0.22, 0.48, 0.72];
+  lanes.forEach((place, index) => {
+    paintLane(ctx, state, time, boost, ground + (height - ground) * place, index === 1 ? -1 : 1, index * 0.37, pulse, glow);
+  });
 }
 
-function paintReflections(ctx: CanvasRenderingContext2D, state: CityState, time: number, pulse: number): void {
+function paintReflections(
+  ctx: CanvasRenderingContext2D,
+  state: CityState,
+  time: number,
+  pulse: number,
+  camX: number,
+  zoom: number,
+  ground: number,
+): void {
+  const { width, height } = state;
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(0, ground - 4, width, height - ground + 4);
+  ctx.clip();
+  ctx.filter = "blur(9px)";
   for (const building of state.buildings) {
     const risen = buildingHeight(building, time);
-    if (risen < 16 * state.unit) continue;
+    if (risen < 12) continue;
+    const sx = width / 2 + (building.x - camX) * zoom;
+    const sw = building.width * zoom;
+    if (sx + sw < -30 || sx > width + 30) continue;
     const body = NIGHT[building.tint % NIGHT.length];
-    const smear = Math.min(64 * state.unit, risen * 0.2);
-    const grad = ctx.createLinearGradient(0, 6 * state.unit, 0, 6 * state.unit + smear);
-    const alpha = 0.16 + 0.1 * pulse;
-    grad.addColorStop(0, rgba(body[0] + 0.25, body[1] + 0.18, body[2] + 0.12, alpha));
+    const mirrorH = Math.min((height - ground) * 0.72, risen * zoom * 0.7);
+    const grad = ctx.createLinearGradient(0, ground, 0, ground + mirrorH);
+    grad.addColorStop(0, rgba(body[0] + 0.22, body[1] + 0.16, body[2] + 0.2, 0.55));
+    grad.addColorStop(0.45, rgba(body[0] + 0.08, body[1] + 0.05, body[2] + 0.1, 0.22));
     grad.addColorStop(1, rgba(body[0], body[1], body[2], 0));
     ctx.fillStyle = grad;
-    ctx.fillRect(building.x + building.width * 0.12, 8 * state.unit, building.width * 0.76, smear);
-    const cols = Math.min(building.cols, 4);
+    ctx.fillRect(sx + sw * 0.06, ground + 2, sw * 0.88, mirrorH);
+  }
+  ctx.filter = "none";
+  for (const building of state.buildings) {
+    const risen = buildingHeight(building, time);
+    if (risen < 12) continue;
+    const sx = width / 2 + (building.x - camX) * zoom;
+    const sw = building.width * zoom;
+    if (sx + sw < -20 || sx > width + 20) continue;
+    const cols = Math.min(building.cols, 5);
+    const mirrorH = Math.min((height - ground) * 0.62, risen * zoom * 0.62);
     for (let col = 0; col < cols; col++) {
-      const x = building.x + (building.width * (col + 0.5)) / cols - 1.1 * state.unit;
-      const column = ctx.createLinearGradient(0, 10 * state.unit, 0, 10 * state.unit + smear * 0.85);
-      column.addColorStop(0, rgba(1, 0.8, 0.46, 0.28 + 0.2 * pulse));
-      column.addColorStop(1, rgba(1, 0.72, 0.36, 0));
+      const shimmer = 0.55 + 0.45 * Math.sin(time * 7 + col * 1.7 + building.x * 0.01);
+      const hot = (0.35 + 0.45 * pulse) * shimmer;
+      const x = sx + (sw * (col + 0.5)) / cols;
+      const column = ctx.createLinearGradient(0, ground, 0, ground + mirrorH);
+      column.addColorStop(0, rgba(1, 0.84, 0.5, hot));
+      column.addColorStop(0.35, rgba(1, 0.7, 0.35, hot * 0.45));
+      column.addColorStop(1, rgba(1, 0.6, 0.3, 0));
       ctx.fillStyle = column;
-      ctx.fillRect(x, 12 * state.unit, 2.2 * state.unit, smear * 0.85);
+      const w = Math.max(3.5, (sw / cols) * 0.28);
+      ctx.fillRect(x - w / 2, ground + 3, w, mirrorH);
     }
   }
+  ctx.restore();
 }
 
 function paintLane(
   ctx: CanvasRenderingContext2D,
   state: CityState,
-  left: number,
-  span: number,
   time: number,
   boost: number,
   lane: number,
   direction: number,
   phase: number,
   pulse: number,
+  glow: number,
 ): void {
-  const length = (78 + 18 * pulse) * state.unit;
-  const thick = 4.2 * state.unit;
-  const speed = (150 + (direction < 0 ? 24 : 0)) * state.unit;
-  const travel = (time * speed + boost * 28 * state.unit + phase) % (span + length + 120 * state.unit);
-  const nose = direction > 0 ? left + travel : left + span - travel;
+  const width = state.width;
+  const length = 260 + 90 * pulse;
+  const thick = 7 + 2 * pulse;
+  const speed = 190 + (direction < 0 ? 36 : 0);
+  const span = width + length + 80;
+  const travel = (time * speed * (1 + 0.55 * glow) + boost * 22 + phase * span) % span;
+  const nose = direction > 0 ? travel - length : width - (travel - length);
   const tail = direction > 0 ? nose - length : nose;
-  const grad = ctx.createLinearGradient(tail, lane, tail + length, lane);
+  const x0 = Math.min(tail, nose);
+  const grad = ctx.createLinearGradient(direction > 0 ? x0 : x0 + length, lane, direction > 0 ? x0 + length : x0, lane);
   if (direction > 0) {
-    grad.addColorStop(0, rgba(1, 0.45, 0.22, 0));
-    grad.addColorStop(0.55, rgba(1, 0.72, 0.42, 0.55 + 0.2 * pulse));
-    grad.addColorStop(1, rgba(1, 0.96, 0.88, 0.95));
+    grad.addColorStop(0, rgba(1, 0.28, 0.12, 0));
+    grad.addColorStop(0.35, rgba(1, 0.45, 0.18, 0.75));
+    grad.addColorStop(0.78, rgba(1, 0.86, 0.55, 0.95));
+    grad.addColorStop(1, rgba(1, 0.98, 0.92, 1));
   } else {
-    grad.addColorStop(0, rgba(0.75, 0.92, 1, 0.95));
-    grad.addColorStop(0.45, rgba(0.45, 0.75, 1, 0.5 + 0.2 * pulse));
-    grad.addColorStop(1, rgba(0.3, 0.55, 1, 0));
+    grad.addColorStop(0, rgba(0.82, 0.95, 1, 1));
+    grad.addColorStop(0.22, rgba(0.45, 0.78, 1, 0.95));
+    grad.addColorStop(0.65, rgba(0.25, 0.5, 1, 0.7));
+    grad.addColorStop(1, rgba(0.2, 0.35, 0.9, 0));
   }
   ctx.fillStyle = grad;
-  ctx.fillRect(tail, lane - thick / 2, length, thick);
-  const headX = direction > 0 ? nose : tail;
-  ctx.fillStyle = rgba(1, 0.98, 0.94, 0.95);
+  ctx.fillRect(x0, lane - thick / 2, length, thick);
+  const headX = direction > 0 ? x0 + length : x0;
+  const head = ctx.createRadialGradient(headX, lane, 1, headX, lane, 16);
+  head.addColorStop(0, rgba(1, 1, 1, 1));
+  head.addColorStop(0.45, rgba(1, 0.95, 0.85, 0.85));
+  head.addColorStop(1, rgba(1, 0.8, 0.4, 0));
+  ctx.fillStyle = head;
   ctx.beginPath();
-  ctx.arc(headX, lane, 3.1 * state.unit, 0, Math.PI * 2);
+  ctx.arc(headX, lane, 16, 0, Math.PI * 2);
   ctx.fill();
 }

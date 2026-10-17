@@ -1,5 +1,5 @@
 import type { MusicData, Section, ToneEvent } from "../music";
-import { chromaAt, sectionAt } from "../music";
+import { chromaAt, sectionAt, soundAt } from "../music";
 import { clamp, damp, roundRect, sampleCurve, smoothstep, timesPulse } from "../math";
 import { defineTemplate, type ParamSpec } from "../template";
 import { BAKE_DT, TAU, as2d, frameCount, rgb, rgba } from "./shared";
@@ -126,8 +126,13 @@ function buildPiano(width: number, height: number, music: MusicData, harmony: bo
 }
 
 function fallbackTones(music: MusicData): ToneEvent[] {
-  const beats = music.beats.length ? music.beats : [0.4];
-  return beats.map((time) => ({ time, duration: 0.42, midi: 60 + Math.round(chromaPeak(music, time)), source: "chroma" as const }));
+  const beats = music.beats.length ? music.beats : [];
+  return beats.filter((time) => soundAt(music, time)).map((time) => ({
+    time,
+    duration: 0.42,
+    midi: 60 + Math.round(chromaPeak(music, time)),
+    source: "chroma" as const,
+  }));
 }
 
 function chromaPeak(music: MusicData, time: number): number {
@@ -195,23 +200,10 @@ function hold(taken: Map<number, [number, number][]>, midi: number, time: number
   taken.set(midi, list);
 }
 
-function chordClasses(column: number[], count: number, rootHint: number): number[] {
-  const order =
-    column.length && Math.max(...column) > 1e-6
-      ? [...column.keys()].sort((a, b) => column[b] - column[a])
-      : [rootHint % 12, (rootHint + 4) % 12, (rootHint + 7) % 12, (rootHint + 11) % 12];
-  const picked: number[] = [];
-  for (const pitch of order) {
-    if (!picked.includes(pitch)) picked.push(pitch);
-    if (picked.length >= count) break;
-  }
-  let extra = 0;
-  while (picked.length < count) {
-    const candidate = (picked[0] + 4 + 3 * extra) % 12;
-    extra++;
-    if (!picked.includes(candidate)) picked.push(candidate);
-  }
-  return picked.slice(0, count);
+function chordClasses(column: number[], count: number): number[] {
+  if (!column.length || Math.max(...column) <= 1e-4) return [];
+  const order = [...column.keys()].sort((a, b) => column[b] - column[a]);
+  return order.slice(0, count);
 }
 
 function voice(
@@ -241,17 +233,14 @@ function addArrangement(notes: KeyNote[], music: MusicData, lo: number, hi: numb
   for (const note of notes) hold(taken, note.display, note.time, note.duration);
   const strong = new Set((music.extensions?.strongBeats ?? []).map((hit) => hit.toFixed(5)));
   const bassHits = new Set(bassTimes(music).map((hit) => hit.toFixed(5)));
-  const melodyAt = new Map<string, number>();
-  for (const note of notes) {
-    if (note.source === "pitch" && !melodyAt.has(note.time.toFixed(3))) melodyAt.set(note.time.toFixed(3), note.midi);
-  }
-    for (const beat of beats) {
+  for (const beat of beats) {
     if (beat > music.duration + 1e-3) return;
+    if (!soundAt(music, beat)) continue;
     const energy = sectionAt(music, beat).energy;
     const count = energy < 0.62 ? 3 : 4;
     const column = chromaAt(music, beat);
-    const rootHint = melodyAt.get(beat.toFixed(3)) ?? notes[0]?.midi ?? 60;
-    const classes = chordClasses(column, count, rootHint);
+    const classes = chordClasses(column, count);
+    if (!classes.length) continue;
     const duration = clamp(0.12 + 0.2 * energy, 0.12, 0.34);
     classes.forEach((pitchClass, chordIndex) => {
       const prefer = chordIndex === count - 1 && energy >= 0.62 ? "high" : "mid";

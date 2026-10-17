@@ -6,6 +6,8 @@ import puppeteer from "puppeteer-core";
 const root = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
 const song = process.argv[2];
 const outDir = process.argv[3] || "/opt/cursor/artifacts/web-scenes";
+const only = (process.argv[4] || "").split(",").filter(Boolean);
+const moments = (process.argv[5] || "").split(",").filter(Boolean);
 if (!song) {
   console.error("usage: node scripts/capture.mjs <song> [outDir]");
   process.exit(1);
@@ -35,20 +37,43 @@ try {
     if (message.type() === "error") console.error("console", message.text());
   });
   await page.setViewport({ width: 1440, height: 900, deviceScaleFactor: 1 });
-  await page.goto("http://127.0.0.1:4173/", { waitUntil: "networkidle0" });
-  await page.waitForFunction(() => window.__m2v && window.__m2v.ready);
+  console.log("opening");
+  await page.goto("http://127.0.0.1:4173/", { waitUntil: "domcontentloaded" });
+  console.log("opened");
+  await page.waitForFunction(() => window.__m2v && window.__m2v.ready, { timeout: 30000 });
+  console.log("app ready");
   const input = await page.$("#file");
   await input.uploadFile(song);
-  await page.waitForFunction(() => window.__m2v.ready && window.__m2v.demo === false, { timeout: 180000 });
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  const kicked = await page.evaluate(() => document.querySelector("#status")?.textContent ?? "");
+  if (!kicked.includes("分析") && !kicked.includes("听")) {
+    await page.evaluate(() => {
+      document.querySelector("#file").dispatchEvent(new Event("change", { bubbles: true }));
+    });
+  }
+  const loaded = Date.now() + 180000;
+  while (Date.now() < loaded) {
+    const state = await page.evaluate(() => ({
+      ready: window.__m2v?.ready,
+      demo: window.__m2v?.demo,
+      status: document.querySelector("#status")?.textContent ?? "",
+    }));
+    console.log("status", state.status, "demo", state.demo);
+    if (state.ready && state.demo === false) break;
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+  const done = await page.evaluate(() => window.__m2v.ready && window.__m2v.demo === false);
+  if (!done) throw new Error("analysis did not finish");
   const music = await page.evaluate(() => window.__m2v.music);
-  const ids = await page.evaluate(() => window.__m2v.templates);
+  const ids = (await page.evaluate(() => window.__m2v.templates)).filter((id) => !only.length || only.includes(id));
   fs.writeFileSync(path.join(outDir, "music.json"), JSON.stringify(summary(music), null, 2));
   console.log("tempo", music.tempo, "beats", music.beats.length, "onsets", music.onsets.length, "tones", music.extensions?.tones?.length);
   console.log("templates", ids);
   console.log("sections", music.sections);
 
-  const times = pickTimes(music);
+  const times = explicitTimes(process.argv[6]) ?? pickTimes(music);
   console.log("moments", times);
+  const probe = times.quiet ?? Object.values(times)[0];
   const stable = await page.evaluate(async (time) => {
     window.__m2v.pause();
     window.__m2v.seek(time);
@@ -59,12 +84,13 @@ try {
     await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
     const second = document.querySelector("#view").toDataURL("image/png");
     return first === second;
-  }, times.quiet);
+  }, probe);
   console.log("deterministic", stable);
   if (!stable) code = 1;
 
   for (const id of ids) {
     for (const [name, time] of Object.entries(times)) {
+      if (moments.length && !moments.includes(name)) continue;
       await page.evaluate(async (templateId, at) => {
         window.__m2v.pause();
         if (!window.__m2v.setTemplate(templateId)) throw new Error(`missing template ${templateId}`);
@@ -72,6 +98,8 @@ try {
         await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
       }, id, time);
       const dataUrl = await page.evaluate(() => document.querySelector("#view").toDataURL("image/png"));
+      const clock = await page.evaluate(() => document.querySelector("#clock")?.textContent ?? "");
+      console.log("clock", name, clock);
       const file = path.join(outDir, `${id}-${name}.png`);
       fs.writeFileSync(file, Buffer.from(dataUrl.split(",")[1], "base64"));
       console.log("wrote", file);
@@ -112,6 +140,18 @@ function summary(music) {
     chromaTones: tones.filter((tone) => tone.source === "chroma").length,
     chromaFrames: music.extensions?.chroma?.times?.length ?? 0,
   };
+}
+
+function explicitTimes(raw) {
+  if (!raw) return null;
+  const times = {};
+  for (const part of raw.split(",")) {
+    const [name, value] = part.split("=");
+    const time = Number(value);
+    if (!name || !Number.isFinite(time)) continue;
+    times[name] = time;
+  }
+  return Object.keys(times).length ? times : null;
 }
 
 function pickTimes(music) {
