@@ -38,7 +38,6 @@ export interface Obstacle {
 type Pt = [number, number];
 type Poly = [Pt, Pt, number];
 type Phrase = "cluster" | "stretch" | "corridor" | "curve";
-type RunMode = "drift" | "spiral" | "wander";
 type Mood = "calm" | "mid" | "intense";
 
 interface PhraseSection {
@@ -113,9 +112,8 @@ export function solveMap(music: MusicData, seed: number, skinName: string): { ob
   let heading = lane + side * SPREAD;
   let turnSide = side;
   let runLeft = 0;
-  let runMode: RunMode = "wander";
-  let sameSide = 0;
   let lastAngle = 0;
+  const flownTurns: number[] = [];
   let stepOut = false;
   let pos: Pt = [0, 0];
   let tPrev = 0;
@@ -129,8 +127,6 @@ export function solveMap(music: MusicData, seed: number, skinName: string): { ob
   let lastKind = "";
   let lastPhrase = "";
   let strongOrdinal = 0;
-  const gaps = deduped.slice(1).map((beat, index) => beat[0] - deduped[index][0]);
-  const medianDt = gaps.length ? gaps.slice().sort((a, b) => a - b)[gaps.length >> 1] : 0.5;
   const polys: Poly[] = [];
   deduped.forEach(([beat, isStrong], index) => {
     try {
@@ -139,52 +135,40 @@ export function solveMap(music: MusicData, seed: number, skinName: string): { ob
     if (extend && phrase !== lastPhrase) stepOut = true;
     lastPhrase = phrase;
     const dt = Math.max(1e-3, beat - tPrev);
-    let length = speed * dt * (0.4 + spread * 0.06);
-    if (medianDt < 0.55) length = Math.min(length, 210 * Math.sqrt(dt / medianDt));
+    let length = speed * dt * (0.55 + spread * 0.05);
     if (stepOut) {
-      length *= 1.08;
+      length *= 1.06;
       stepOut = false;
     }
-    if (runLeft <= 0) {
+    if (runLeft <= 0 || sameSideRun(flownTurns, turnSide) >= 3) {
       turnSide = -turnSide;
-      sameSide = 0;
-      if (runMode !== "drift") {
-        runMode = "drift";
-        runLeft = 6 + Math.floor(xorshift32(rng) * 5);
-      } else {
-        const picked = pickRun(music, beat, rng);
-        runLeft = picked.left;
-        runMode = picked.mode;
-      }
+      const roll = xorshift32(rng);
+      runLeft = roll < 0.62 ? 1 : roll < 0.9 ? 2 : 3;
     }
     runLeft -= 1;
-    length = Math.max(170, Math.min(230, length));
-    if (runMode === "spiral") length *= 1.2;
+    length = Math.max(MIN_SEGMENT, Math.min(520, length));
     const drive = bounceDrive(music, beat, isStrong, tPrev, section.energy, rng);
-    const angleLimit = runMode === "drift" ? (18 * Math.PI) / 180 : MAX_TURN;
-    let angle = separateAngle(turnAngle(drive, runMode, rng), lastAngle, angleLimit, rng);
-    const open = (300 * Math.PI) / 180;
-    if (Math.abs(sameSide + turnSide * angle) >= open) {
-      turnSide = -turnSide;
-      sameSide = 0;
-      runMode = "drift";
-      runLeft = 6 + Math.floor(xorshift32(rng) * 5);
-      angle = Math.min(angle, (14 * Math.PI) / 180);
-    }
+    const angle = separateAngle(bounceAngle(drive, rng), lastAngle, (72 * Math.PI) / 180, rng);
     const prevSeg = segments[segments.length - 1];
     const base = prevSeg ? Math.atan2(prevSeg.y1 - prevSeg.y0, prevSeg.x1 - prevSeg.x0) : heading;
-    const bend = turnSide * angle;
-    sameSide += bend;
-    lastAngle = angle;
+    const flight = chooseFlight(base, turnSide, angle, length, pos, segments, flownTurns);
+    const bend = flight.bend;
+    if (Math.sign(bend) && Math.sign(bend) !== turnSide) {
+      turnSide = Math.sign(bend);
+      runLeft = xorshift32(rng) < 0.75 ? 0 : 1;
+    }
+    lastAngle = Math.abs(bend);
     const flown = base + bend;
-    let [ivx, ivy] = unit(Math.cos(flown), Math.sin(flown));
-    let hit: Pt = [pos[0] + ivx * length, pos[1] + ivy * length];
+    let ivx = flight.ivx;
+    let ivy = flight.ivy;
+    let hit = flight.hit;
     const nextLane = flown;
     const nextSide = turnSide;
     const out = flown + bend * 0.35;
     let [ovx, ovy] = unit(Math.cos(out), Math.sin(out));
     const planned = out;
     [hit, ivx, ivy, ovx, ovy] = limitTurn(prevSeg, pos, hit, ivx, ivy, ovx, ovy);
+    flownTurns.push(headingDelta(prevSeg, pos, hit));
     const kind = chooseKind(pool, isStrong, counts, lastKind, rng);
     counts[kind] += 1;
     lastKind = kind;
@@ -458,17 +442,114 @@ function bounceDrive(
   return Math.max(0, Math.min(1, drive));
 }
 
-function turnAngle(drive: number, mode: RunMode, rng: { v: number }): number {
-  const jitter = (xorshift32(rng) - 0.5) * ((16 * Math.PI) / 180);
-  let angle = MIN_TURN + (MAX_TURN - MIN_TURN) * drive;
-  if (mode === "drift") angle = MIN_TURN + ((10 * Math.PI) / 180) * (0.35 + 0.65 * (1 - drive));
-  if (mode === "spiral") angle = (36 * Math.PI) / 180 + ((70 - 36) * Math.PI) / 180 * drive;
-  const limit = mode === "drift" ? (18 * Math.PI) / 180 : MAX_TURN;
-  return Math.max(MIN_TURN, Math.min(limit, angle + jitter));
+function bounceAngle(drive: number, rng: { v: number }): number {
+  const jitter = (xorshift32(rng) - 0.5) * ((22 * Math.PI) / 180);
+  const angle = (16 * Math.PI) / 180 + ((50 * Math.PI) / 180) * drive + jitter;
+  return Math.max((14 * Math.PI) / 180, Math.min((70 * Math.PI) / 180, angle));
+}
+
+function recentTurnSum(turns: number[], extra: number): number {
+  const start = Math.max(0, turns.length - (TURN_WINDOW - 1));
+  let sum = extra;
+  for (let index = start; index < turns.length; index++) sum += turns[index];
+  return sum;
+}
+
+function sameSideRun(turns: number[], side: number): number {
+  if (!side) return 0;
+  let count = 0;
+  for (let index = turns.length - 1; index >= 0; index--) {
+    if (Math.sign(turns[index]) !== side) break;
+    count += 1;
+  }
+  return count;
+}
+
+function headingDelta(prev: Segment | undefined, from: Pt, to: Pt): number {
+  if (!prev) return 0;
+  const ux = prev.x1 - prev.x0;
+  const uy = prev.y1 - prev.y0;
+  const vx = to[0] - from[0];
+  const vy = to[1] - from[1];
+  if (Math.hypot(ux, uy) < 1e-6 || Math.hypot(vx, vy) < 1e-6) return 0;
+  return Math.atan2(ux * vy - uy * vx, ux * vx + uy * vy);
+}
+
+/** Keeps the signed heading change over the last eight bounces inside ±200°. */
+function fitWindow(turns: number[], bend: number): number {
+  const base = recentTurnSum(turns, 0);
+  if (Math.abs(base + bend) <= OPEN_TURN + 1e-6) return bend;
+  if (Math.abs(base - bend) <= OPEN_TURN + 1e-6) return -bend;
+  const lo = -OPEN_TURN - base;
+  const hi = OPEN_TURN - base;
+  return Math.max(lo, Math.min(hi, bend));
+}
+
+function trailCrosses(from: Pt, to: Pt, segments: Segment[]): boolean {
+  const start = Math.max(0, segments.length - 16);
+  for (let index = start; index < segments.length - 1; index++) {
+    const segment = segments[index];
+    if (segmentsCross(from, to, [segment.x0, segment.y0], [segment.x1, segment.y1])) return true;
+  }
+  return false;
+}
+
+function segmentsCross(a: Pt, b: Pt, c: Pt, d: Pt): boolean {
+  const side = (p: Pt, q: Pt, r: Pt) => (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0]);
+  const ab1 = side(a, b, c);
+  const ab2 = side(a, b, d);
+  const cd1 = side(c, d, a);
+  const cd2 = side(c, d, b);
+  const eps = 2;
+  if (Math.abs(ab1) <= eps || Math.abs(ab2) <= eps || Math.abs(cd1) <= eps || Math.abs(cd2) <= eps) return false;
+  return ab1 * ab2 < 0 && cd1 * cd2 < 0;
+}
+
+function chooseFlight(
+  base: number,
+  side: number,
+  angle: number,
+  length: number,
+  pos: Pt,
+  segments: Segment[],
+  turns: number[],
+): { bend: number; hit: Pt; ivx: number; ivy: number } {
+  const magnitudes = [
+    angle,
+    Math.min((70 * Math.PI) / 180, angle + (18 * Math.PI) / 180),
+    Math.max(MIN_TURN, angle - (18 * Math.PI) / 180),
+    (28 * Math.PI) / 180,
+    (52 * Math.PI) / 180,
+  ];
+  let fallback: { bend: number; hit: Pt; ivx: number; ivy: number } | null = null;
+  for (const trySide of [side, -side]) {
+    for (const magnitude of magnitudes) {
+      let bend = fitWindow(turns, trySide * magnitude);
+      if (sameSideRun(turns, Math.sign(bend)) >= 3) bend = fitWindow(turns, -bend);
+      bend = Math.max(-MAX_TURN, Math.min(MAX_TURN, bend));
+      const heading = base + bend;
+      const [ivx, ivy] = unit(Math.cos(heading), Math.sin(heading));
+      const hit: Pt = [pos[0] + ivx * length, pos[1] + ivy * length];
+      const candidate = { bend, hit, ivx, ivy };
+      if (!fallback) fallback = candidate;
+      if (!trailCrosses(pos, hit, segments)) return candidate;
+    }
+  }
+  const straight = fitWindow(turns, side * MIN_TURN);
+  const heading = base + straight;
+  const [ivx, ivy] = unit(Math.cos(heading), Math.sin(heading));
+  return (
+    fallback ?? {
+      bend: straight,
+      hit: [pos[0] + ivx * length, pos[1] + ivy * length],
+      ivx,
+      ivy,
+    }
+  );
 }
 
 function separateAngle(angle: number, previous: number, limit: number, rng: { v: number }): number {
-  const gap = (16 * Math.PI) / 180;
+  const gap = (18 * Math.PI) / 180;
   const clamped = Math.max(MIN_TURN, Math.min(limit, angle));
   if (!(previous > 0) || Math.abs(clamped - previous) >= gap) return clamped;
   const kick = gap + xorshift32(rng) * ((20 * Math.PI) / 180);
@@ -480,19 +561,6 @@ function separateAngle(angle: number, previous: number, limit: number, rng: { v:
   const step = Math.min(gap * 0.4, (limit - MIN_TURN) * 0.45);
   const nudged = clamped >= (limit + MIN_TURN) / 2 ? clamped - step : clamped + step;
   return Math.max(MIN_TURN, Math.min(limit, nudged));
-}
-
-function pickRun(music: MusicData, beat: number, rng: { v: number }): { left: number; mode: RunMode } {
-  const loud = loudAt(music, beat);
-  const roll = xorshift32(rng);
-  if (roll < 0.12 + (1 - loud) * 0.2) {
-    return { left: 6 + Math.floor(xorshift32(rng) * 8), mode: "drift" };
-  }
-  if (roll > 0.72 + (1 - loud) * 0.12) {
-    return { left: 3 + Math.floor(xorshift32(rng) * 2), mode: "spiral" };
-  }
-  const span = 2 + Math.floor(xorshift32(rng) * 4 + loud * 3);
-  return { left: Math.max(2, Math.min(8, span)), mode: "wander" };
 }
 
 function unit(x: number, y: number): Pt {
@@ -602,7 +670,11 @@ function insideCloud(pos: Pt, obstacles: Obstacle[], margin: number): boolean {
 
 /** A bounce may be sharp, but it still has to keep going forward. */
 const MAX_TURN = (75 * Math.PI) / 180;
-const MIN_TURN = (8 * Math.PI) / 180;
+const MIN_TURN = (12 * Math.PI) / 180;
+const TURN_WINDOW = 8;
+const OPEN_TURN = (200 * Math.PI) / 180;
+/** Long enough that a wall of about 156 world units reads as its own object. */
+const MIN_SEGMENT = 156 * 2.5;
 
 function limitTurn(
   prev: Segment | undefined,

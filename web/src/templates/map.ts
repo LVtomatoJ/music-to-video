@@ -257,7 +257,7 @@ function cameraTarget(
   consider(ball[0] + (vx / speed) * lead, ball[1] + (vy / speed) * lead, ballR);
   const fitX = Math.max(maxX - minX, 160);
   const fitY = Math.max(maxY - minY, 120);
-  const zoom = clamp(Math.min((width * 0.62) / fitX, (height * 0.62) / fitY), 0.4, 0.52);
+  const zoom = clamp(Math.min((width * 0.64) / fitX, (height * 0.64) / fitY), 0.46, 0.54);
   const cx = (minX + maxX) / 2;
   const cy = (minY + maxY) / 2;
   return [Number.isFinite(cx) ? cx : ball[0], Number.isFinite(cy) ? cy : ball[1], Number.isFinite(zoom) ? zoom : 0.7];
@@ -320,7 +320,7 @@ export function framedView(state: MapState, time: number): {
     camY = worldY;
     zoom = 0.7;
   }
-  zoom = clamp(zoom, 0.38, 0.54);
+  zoom = clamp(zoom, 0.44, 0.56);
   let ballX = (worldX - camX) * zoom + state.width / 2;
   let ballY = (worldY - camY) * zoom + state.height / 2;
   const margin = 40;
@@ -581,9 +581,9 @@ function wallLength(obstacle: Obstacle, obstacles: Obstacle[]): number {
     const along = Math.abs(dx * obstacle.tx + dy * obstacle.ty);
     const across = Math.abs(dx * obstacle.nx + dy * obstacle.ny);
     if (across > 110) continue;
-    room = Math.min(room, Math.max(158, along - 28));
+    room = Math.min(room, Math.max(140, along - 28));
   }
-  const wanted = 175;
+  const wanted = 156;
   return Math.min(wanted, room);
 }
 
