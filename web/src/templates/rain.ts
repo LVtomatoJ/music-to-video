@@ -483,7 +483,7 @@ function paintRain(
   paintStreaks(ctx, state, time, energy);
   for (const drop of byDepth) paintFalling(ctx, state, drop, time);
   ctx.restore();
-  view.post.glow = (0.8 + 0.5 * glow) * params.shine;
+  view.post.glow = (0.92 + 0.2 * glow) * params.shine;
   view.post.grain = 1;
   view.post.vignette = 1;
 }
@@ -566,10 +566,10 @@ function paintWater(
   const hz = state.horizon;
   const lift = 0.026 * glow + 0.012 * energy;
   const water = ctx.createLinearGradient(0, hz, 0, h);
-  const c0 = mix(0.08 + lift, 0.135 + lift, 0.18 + lift, tint, 0.18);
-  const c1 = mix(0.036 + lift, 0.088 + lift, 0.12 + lift, tint, 0.22);
-  const c2 = mix(0.016 + lift * 0.5, 0.05 + lift, 0.075 + lift, tint, 0.22);
-  const c3 = mix(0.006, 0.022, 0.036, tint, 0.16);
+  const c0 = mix(0.08 + lift, 0.135 + lift, 0.18 + lift, tint, 0.05);
+  const c1 = mix(0.036 + lift, 0.088 + lift, 0.12 + lift, tint, 0.03);
+  const c2 = mix(0.016 + lift * 0.5, 0.05 + lift, 0.075 + lift, tint, 0.015);
+  const c3 = mix(0.006, 0.022, 0.036, tint, 0);
   water.addColorStop(0, rgb(...c0));
   water.addColorStop(0.18, rgb(...c1));
   water.addColorStop(0.6, rgb(...c2));
@@ -592,8 +592,8 @@ function paintWater(
   const radius = 760 * state.unit;
   const sheen = ctx.createRadialGradient(0, 0, 0, 0, 0, radius);
   const alpha = (0.12 + 0.17 * glow + 0.06 * energy) * params.shine;
-  const s0 = mix(0.4, 0.58, 0.7, tint, 0.35);
-  const s1 = mix(0.2, 0.36, 0.48, tint, 0.35);
+  const s0 = mix(0.4, 0.58, 0.7, tint, 0.08);
+  const s1 = mix(0.2, 0.36, 0.48, tint, 0.08);
   sheen.addColorStop(0, rgba(s0[0], s0[1], s0[2], alpha));
   sheen.addColorStop(0.5, rgba(s1[0], s1[1], s1[2], alpha * 0.4));
   sheen.addColorStop(1, rgba(0.1, 0.2, 0.3, 0));
@@ -742,7 +742,7 @@ function paintRipples(
     const gradient = ctx.createLinearGradient(0, -radius, 0, radius);
     gradient.addColorStop(0, rgba(far[0], far[1], far[2], alpha));
     gradient.addColorStop(0.5, rgba(mid[0], mid[1], mid[2], alpha * 0.55));
-    gradient.addColorStop(1, rgba(near[0], near[1], near[2], alpha * 0.32));
+    gradient.addColorStop(1, rgba(near[0] * 0.7, near[1] * 0.75, near[2] * 0.8, alpha * 0.18));
     ctx.strokeStyle = gradient;
     ctx.lineWidth = Math.max(0.4, width);
     ctx.beginPath();

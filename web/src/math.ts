@@ -77,6 +77,64 @@ export function mixSeed(a: number, b: number): number {
   return x || 1;
 }
 
+export function hslToRgb(h: number, s: number, l: number): [number, number, number] {
+  const hue = ((h % 360) + 360) % 360;
+  const c = (1 - Math.abs(2 * l - 1)) * s;
+  const hp = hue / 60;
+  const x = c * (1 - Math.abs((hp % 2) - 1));
+  let r = 0;
+  let g = 0;
+  let b = 0;
+  if (hp < 1) [r, g, b] = [c, x, 0];
+  else if (hp < 2) [r, g, b] = [x, c, 0];
+  else if (hp < 3) [r, g, b] = [0, c, x];
+  else if (hp < 4) [r, g, b] = [0, x, c];
+  else if (hp < 5) [r, g, b] = [x, 0, c];
+  else [r, g, b] = [c, 0, x];
+  const m = l - c / 2;
+  return [r + m, g + m, b + m];
+}
+
+/** Smooth bump with zero slope at both ends. `age` is seconds after the hit. */
+export function pulse(age: number, attack: number, release: number): number {
+  if (age < 0 || age >= attack + release) return 0;
+  if (age < attack) return smoothstep(age / Math.max(attack, 1e-4));
+  return smoothstep(1 - (age - attack) / Math.max(release, 1e-4));
+}
+
+export function timesPulse(times: ArrayLike<number>, now: number, attack: number, release: number): number {
+  const start = lowerBound(times, now - (attack + release));
+  let level = 0;
+  for (let i = start; i < times.length; i++) {
+    const age = now - times[i];
+    if (age < 0) break;
+    level = Math.max(level, pulse(age, attack, release));
+  }
+  return level;
+}
+
+export function roundRect(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  r: number,
+): void {
+  const radius = Math.max(0, Math.min(r, Math.abs(w) / 2, Math.abs(h) / 2));
+  ctx.beginPath();
+  if (radius <= 0.01) {
+    ctx.rect(x, y, w, h);
+    return;
+  }
+  ctx.moveTo(x + radius, y);
+  ctx.arcTo(x + w, y, x + w, y + h, radius);
+  ctx.arcTo(x + w, y + h, x, y + h, radius);
+  ctx.arcTo(x, y + h, x, y, radius);
+  ctx.arcTo(x, y, x + w, y, radius);
+  ctx.closePath();
+}
+
 export function lowerBound(times: ArrayLike<number>, target: number): number {
   let lo = 0;
   let hi = times.length;

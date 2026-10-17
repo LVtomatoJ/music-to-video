@@ -1,6 +1,6 @@
 import { ellisBeats, estimateBpm, strongBeats } from "./beats";
 import { fftMagnitude } from "./fft";
-import { clamp, interp, percentile } from "./math";
+import { clamp, interp, lowerBound, percentile } from "./math";
 
 export const MUSIC_DATA_VERSION = 1 as const;
 
@@ -42,7 +42,21 @@ export interface MusicData {
   extensions?: {
     analyzer?: string;
     strongBeats?: number[];
+    /** Twelve pitch-class weights, each frame normalized by its peak. */
+    chroma?: { times: number[]; values: number[][] };
+    /**
+     * Melody notes. `pitch` is a spectral peak in G3–C6; `chroma` is the
+     * loudest pitch class on a beat when the peak track is too thin.
+     */
+    tones?: ToneEvent[];
   };
+}
+
+export interface ToneEvent {
+  time: number;
+  duration: number;
+  midi: number;
+  source: "pitch" | "chroma";
 }
 
 const ANALYSIS_RATE = 22050;
@@ -110,12 +124,17 @@ async function analyzeSamples(
   const low = new Float32Array(nFrames);
   const mid = new Float32Array(nFrames);
   const high = new Float32Array(nFrames);
+  const chromaRaw = new Float32Array(nFrames * 12);
+  const pitchMidi = new Int16Array(nFrames);
+  pitchMidi.fill(-1);
   const binHz = sampleRate / FFT_SIZE;
   const hfStart = Math.ceil(2000 / binHz);
   const lowBin = Math.max(1, Math.floor(20 / binHz));
   const midBin = Math.ceil(250 / binHz);
   const highBin = Math.ceil(2000 / binHz);
   const airBin = Math.min(mag.length, Math.ceil(8000 / binHz));
+  const pitchLo = Math.max(1, Math.ceil(196 / binHz));
+  const pitchHi = Math.min(mag.length - 1, Math.floor(1046 / binHz));
 
   for (let i = 0; i < nFrames; i++) {
     const offset = i * HOP;
@@ -133,6 +152,10 @@ async function analyzeSamples(
     let lowSum = 0;
     let midSum = 0;
     let highSum = 0;
+    let peak = 0;
+    let peakBin = 0;
+    let bandSum = 0;
+    let bandCount = 0;
     for (let k = 1; k < mag.length; k++) {
       const power = Math.log1p(mag[k]);
       const delta = power - prev[k];
@@ -144,6 +167,25 @@ async function analyzeSamples(
       if (k >= lowBin && k < midBin) lowSum += power;
       else if (k >= midBin && k < highBin) midSum += power;
       else if (k >= highBin && k < airBin) highSum += power;
+      const hz = k * binHz;
+      if (hz >= 60 && hz <= 4200) {
+        const midiFloat = 69 + 12 * Math.log2(hz / 440);
+        const pc = ((Math.round(midiFloat) % 12) + 12) % 12;
+        chromaRaw[i * 12 + pc] += mag[k];
+      }
+      if (k >= pitchLo && k <= pitchHi) {
+        bandSum += mag[k];
+        bandCount += 1;
+        if (mag[k] > peak) {
+          peak = mag[k];
+          peakBin = k;
+        }
+      }
+    }
+    const floor = bandCount ? bandSum / bandCount : 0;
+    if (peak > floor * 3.2 && peakBin > 0) {
+      const hz = peakBin * binHz;
+      pitchMidi[i] = Math.round(69 + 12 * Math.log2(hz / 440));
     }
     flux[i] = full;
     hfFlux[i] = hf;
@@ -177,6 +219,8 @@ async function analyzeSamples(
   const downbeats = chooseDownbeats(beats, times, bands.low);
   const onsets = pickOnsets(novelty, frameRate, duration);
   const sections = buildSections(times, loudness, duration);
+  const chromaValues = foldChroma(chromaRaw, nFrames);
+  const tones = buildTones(pitchMidi, frameRate, duration, beats, chromaValues, times, onsets);
   return {
     version: MUSIC_DATA_VERSION,
     duration,
@@ -190,10 +234,137 @@ async function analyzeSamples(
     bands,
     sections,
     extensions: {
-      analyzer: "webaudio-fft-ellis-v1",
+      analyzer: "webaudio-fft-chroma-v1",
       strongBeats: accents,
+      chroma: { times, values: chromaValues },
+      tones,
     },
   };
+}
+
+function foldChroma(raw: Float32Array, frames: number): number[][] {
+  const values: number[][] = [];
+  for (let i = 0; i < frames; i++) {
+    let peak = 1e-9;
+    for (let pc = 0; pc < 12; pc++) peak = Math.max(peak, raw[i * 12 + pc]);
+    const row: number[] = [];
+    for (let pc = 0; pc < 12; pc++) row.push(raw[i * 12 + pc] / peak);
+    values.push(row);
+  }
+  return values;
+}
+
+function buildTones(
+  pitch: Int16Array,
+  frameRate: number,
+  duration: number,
+  beats: number[],
+  chroma: number[][],
+  times: number[],
+  onsets: Onset[],
+): ToneEvent[] {
+  const notes: ToneEvent[] = [];
+  let index = 0;
+  while (index < pitch.length) {
+    const midi = pitch[index];
+    if (midi < 0) {
+      index += 1;
+      continue;
+    }
+    let end = index + 1;
+    while (end < pitch.length && pitch[end] >= 0 && Math.abs(pitch[end] - midi) <= 1) end += 1;
+    const span = (end - index) / frameRate;
+    if (span >= 0.07) {
+      let start = index / frameRate;
+      let nearest = start;
+      let best = 0.05;
+      for (const onset of onsets) {
+        const delta = Math.abs(onset.time - start);
+        if (delta <= best) {
+          best = delta;
+          nearest = onset.time;
+        }
+        if (onset.time > start + 0.05) break;
+      }
+      if (best <= 0.05) start = nearest;
+      notes.push({
+        time: start,
+        duration: clamp(span, 0.12, 2.4),
+        midi,
+        source: "pitch",
+      });
+    }
+    index = end;
+  }
+  const pitched = dedupeTones(notes);
+  if (pitched.length >= 6) return pitched;
+  const fallback: ToneEvent[] = [];
+  const period = beats.length > 2 ? medianGap(beats) : 0.5;
+  for (const beat of beats) {
+    if (beat < 0 || beat > duration) continue;
+    const column = chroma[chromaIndex(times, beat)] ?? new Array(12).fill(0);
+    let pc = 0;
+    let best = -1;
+    for (let i = 0; i < 12; i++) {
+      if (column[i] > best) {
+        best = column[i];
+        pc = i;
+      }
+    }
+    fallback.push({
+      time: beat,
+      duration: clamp(period * 0.72, 0.16, 1.4),
+      midi: 60 + pc,
+      source: "chroma",
+    });
+  }
+  return dedupeTones(fallback);
+}
+
+function chromaIndex(times: number[], time: number): number {
+  if (!times.length) return 0;
+  let index = lowerBound(times, time);
+  if (index >= times.length) index = times.length - 1;
+  else if (times[index] > time && index > 0) index -= 1;
+  return index;
+}
+
+function medianGap(times: number[]): number {
+  const gaps: number[] = [];
+  for (let i = 1; i < times.length; i++) gaps.push(times[i] - times[i - 1]);
+  gaps.sort((a, b) => a - b);
+  return gaps.length ? gaps[gaps.length >> 1] : 0.5;
+}
+
+function dedupeTones(notes: ToneEvent[]): ToneEvent[] {
+  const kept: ToneEvent[] = [];
+  for (const note of notes.slice().sort((a, b) => a.time - b.time)) {
+    const prev = kept[kept.length - 1];
+    if (prev && Math.abs(note.time - prev.time) < 0.06 && Math.abs(note.midi - prev.midi) <= 1) {
+      if (note.duration > prev.duration) kept[kept.length - 1] = note;
+      continue;
+    }
+    kept.push(note);
+  }
+  return kept;
+}
+
+export function sectionAt(music: MusicData, time: number): Section {
+  for (const section of music.sections) {
+    if (time < section.end) return section;
+  }
+  return music.sections[music.sections.length - 1] ?? {
+    start: 0,
+    end: Math.max(music.duration, 0.5),
+    energy: 0.4,
+    label: "verse",
+  };
+}
+
+export function chromaAt(music: MusicData, time: number): number[] {
+  const chroma = music.extensions?.chroma;
+  if (!chroma?.times.length) return new Array(12).fill(0);
+  return chroma.values[chromaIndex(chroma.times, time)] ?? new Array(12).fill(0);
 }
 
 function asArray(values: Float32Array): number[] {
@@ -395,6 +566,33 @@ export function demoMusic(): MusicData {
     extensions: {
       analyzer: "demo",
       strongBeats: downbeats,
+      chroma: { times, values: demoChroma(times, beats, period) },
+      tones: demoTones(beats, period),
     },
   };
+}
+
+function demoTones(beats: number[], period: number): ToneEvent[] {
+  const scale = [60, 62, 64, 67, 69, 72, 74, 76];
+  return beats.map((time, index) => ({
+    time,
+    duration: period * 0.7,
+    midi: scale[(index * 3 + (time >= 8 && time < 18 ? 2 : 0)) % scale.length],
+    source: "pitch" as const,
+  }));
+}
+
+function demoChroma(times: number[], beats: number[], period: number): number[][] {
+  const tones = demoTones(beats, period);
+  return times.map((time) => {
+    let midi = tones[0]?.midi ?? 60;
+    for (const tone of tones) {
+      if (tone.time <= time) midi = tone.midi;
+    }
+    const row = new Array(12).fill(0.04);
+    row[midi % 12] = 1;
+    row[(midi + 4) % 12] = 0.55;
+    row[(midi + 7) % 12] = 0.72;
+    return row;
+  });
 }

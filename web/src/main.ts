@@ -257,6 +257,20 @@ function applyParam(key: string): void {
   renderAt(currentTime());
 }
 
+function useTemplate(id: string): boolean {
+  const next = templates.find((template) => template.meta.id === id);
+  if (!next) return false;
+  if (next !== current) {
+    current = next;
+    params = defaultParams(next.params);
+    renderParams();
+    renderTemplates();
+    rebuild();
+  }
+  renderAt(currentTime());
+  return true;
+}
+
 function renderFacts(): void {
   const sectionText = music.sections
     .map((section) => `${labels[section.label]} ${format(section.start)}`)
@@ -266,6 +280,7 @@ function renderFacts(): void {
     ["拍", String(music.beats.length)],
     ["小节", String(music.downbeats.length)],
     ["音头", String(music.onsets.length)],
+    ["音", String(music.extensions?.tones?.length ?? 0)],
     ["段落", sectionText || "—"],
   ];
   facts.replaceChildren();
@@ -328,7 +343,7 @@ async function runExport(seconds?: number): Promise<{ bytes: number; head: strin
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = `${songName.replace(/\.[^.]+$/, "")}-rain.mp4`;
+    link.download = `${songName.replace(/\.[^.]+$/, "")}-${current.meta.id}.mp4`;
     link.click();
     URL.revokeObjectURL(url);
     status.textContent = usingDemo ? "已导出示例画面，没有声音。" : "已导出，画面和声音都在这个文件里。";
@@ -394,6 +409,9 @@ window.__m2v = {
   get demo() { return usingDemo; },
   get music() { return music; },
   get time() { return currentTime(); },
+  get template() { return current.meta.id; },
+  get templates() { return templates.map((template) => template.meta.id); },
+  setTemplate: useTemplate,
   seek: seekTo,
   play() {
     if (usingDemo) {
@@ -422,6 +440,9 @@ declare global {
       readonly demo: boolean;
       readonly music: MusicData;
       readonly time: number;
+      readonly template: string;
+      readonly templates: string[];
+      setTemplate: (id: string) => boolean;
       seek: (time: number) => void;
       play: () => void;
       pause: () => void;

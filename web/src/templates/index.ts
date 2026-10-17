@@ -1,6 +1,11 @@
 import type { MusicData } from "../music";
 import type { ParamSpec, ParamValues, ParamsOf, TemplateContext, TemplateDefinition, TemplateMeta } from "../template";
+import { ballsTemplate } from "./balls";
+import { cityTemplate } from "./city";
+import { mapTemplate } from "./map";
+import { pianoTemplate } from "./piano";
 import { rainTemplate } from "./rain";
+import { starsTemplate } from "./stars";
 
 export interface RunnableTemplate {
   meta: TemplateMeta;
@@ -23,4 +28,11 @@ function adapt<State, Spec extends Record<string, ParamSpec>>(
   };
 }
 
-export const templates: RunnableTemplate[] = [adapt(rainTemplate)];
+export const templates: RunnableTemplate[] = [
+  adapt(rainTemplate),
+  adapt(cityTemplate),
+  adapt(pianoTemplate),
+  adapt(starsTemplate),
+  adapt(mapTemplate),
+  adapt(ballsTemplate),
+];

@@ -34,6 +34,8 @@ interface MusicData {
   extensions?: {
     analyzer?: string;
     strongBeats?: number[];  // beats 里偏重的那些拍，可选
+    chroma?: { times: number[]; values: number[][] }; // 12 个音级，每帧按峰值归一
+    tones?: { time: number; duration: number; midi: number; source: "pitch" | "chroma" }[];
   };
 }
 ```
@@ -53,8 +55,9 @@ interface MusicData {
 3. 1024 点 FFT、512 点跳跃，算频谱通量、RMS，以及低/中/高频能量。
 4. 节拍用 Ellis 的动态规划（仓库里早期 web 原型已经用过同一套跟踪器）。重拍看拍点上的高频通量。Downbeat 在 4 拍相位里选低音能量更高的那一相。
 5. 段落用平滑响度切成 intro / verse / chorus / bridge / outro。歌如果几乎一样响，就把中间一段标成副歌，避免整首没有结构。
+6. 色度和一条粗音高。同一套 FFT 里，把 60–4200 Hz 的幅度按 MIDI 音级加进 12 维色度，每帧除以峰值。G3–C6 里如果最强的一根谱线超过该段平均的 3.2 倍，就记一个 MIDI。连着的相近音高收成 `tones`。音高太少时，每个拍用当时最响的音级补一条，`source` 标成 `chroma`。这不是 pyin，也不是 Essentia。
 
-Essentia.js 或编译成 WASM 的 aubio 可以以后换掉这一步，尤其是要加音高和色度的时候。换分析器不许改模板函数的签名，只许改 `MusicData` 的内容和 `extensions`。钢琴瀑布需要音高，那是下一步要加进 `extensions` 的可选音轨（`pitches`、`chroma`），不是 v1 的必填字段。
+分析器名字是 `webaudio-fft-chroma-v1`。Essentia.js 可以以后换掉这一步。换分析器不许改模板函数的签名，只许改 `MusicData` 的内容和 `extensions`。色度和音高都在 `extensions` 里，旧模板可以当它们不存在。
 
 ## 模板 API
 
@@ -192,11 +195,12 @@ CLI 打开本地无头浏览器，跑同一个 `render`。服务器不碰音频�
 
 | Python | 模板 | 层 | 用到的 MusicData | 备注 |
 | --- | --- | --- | --- | --- |
-| `rain` | `rain`（已在 `web/`） | 2D | 拍、重拍、音头、响度、段落 | 落点、风和镜头都在 `setup` |
-| `city` | `city` | 2D，楼多了可改 WebGPU | 拍、重拍、响度、频段 | 楼的生长时刻在 `setup` |
-| `stars` | `stars` | 2D 或 WebGPU | 音头、段落 | 星座折线在 `setup` 里保证不相交 |
-| `piano` | `piano` | 2D | 拍、音头，外加以后的 `extensions.pitches` / `chroma` | v1 没有音高，先不迁 |
-| `map` / `balls` | `map` | 2D | 拍、重拍、种子 | 地图在 `setup` 生成 |
+| `rain` | `rain` | 2D | 拍、重拍、音头、响度、段落 | 落点、风和镜头都在 `setup` |
+| `city` | `city` | 2D | 拍、重拍、低音、段落 | 楼的生长和镜头曲线在 `setup` |
+| `stars` | `stars` | 2D | `tones`、段落 | 星座在 `setup` 里弯折、不相交，亮过之后让出位置 |
+| `piano` | `piano` | 2D | 拍、重拍、`tones`、`chroma` | 和声、低音、琶音在 `setup` 里排开，同一琴键不重叠 |
+| `map` | `map` | 2D | 拍、段落、种子 | 疏朗螺旋和镜头在 `setup`。皮肤：霓虹、粉彩、街机 |
+| `balls` | `balls` | 2D | 拍、重拍、种子 | 轨迹在 `setup` 里积分。皮肤：霓虹、粉彩 |
 
 Python 里那些“跟上一帧弹簧”的镜头，迁的时候都改成 `setup` 里积好的曲线，否则网页预览没法随意拖动。
 
@@ -204,7 +208,7 @@ Python 里那些“跟上一帧弹簧”的镜头，迁的时候都改成 `setup
 
 1. **现在。** 浏览器分析、`MusicData`、模板 API、参数面板、可拖动的预览、雨夜、本地 mp4。见 `web/`。
 2. **CLI。** `m2v preview`，和网页用同一份渲染，方便人和代理看关键帧。
-3. **把 city、stars、map 迁进来。** 钢琴等音高扩展。
+3. **已迁。** city、piano、stars、map、balls 和雨夜用同一套 `defineTemplate`。音高仍是频谱峰值加色度，不是 pyin。
 4. **沙箱。** 用户模板进 Worker / iframe。
 5. **市场。** Workers + R2 + D1，上传校验和举报。
 6. **MCP。** 只暴露读规范、看例子、校验、发布。
