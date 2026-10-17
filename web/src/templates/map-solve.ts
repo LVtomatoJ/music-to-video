@@ -3,7 +3,6 @@ import { interp } from "../math";
 
 const BALL_R = 28;
 const SPREAD = 0.58;
-const CLEARANCE = 72;
 const BODY_GAP = 96;
 const MIN_BODY = 48;
 const SOLID_EPS = 1.5;
@@ -36,7 +35,6 @@ export interface Obstacle {
 }
 
 type Pt = [number, number];
-type Poly = [Pt, Pt, number];
 type Phrase = "cluster" | "stretch" | "corridor" | "curve";
 type Mood = "calm" | "mid" | "intense";
 
@@ -127,7 +125,7 @@ export function solveMap(music: MusicData, seed: number, skinName: string): { ob
   let lastKind = "";
   let lastPhrase = "";
   let strongOrdinal = 0;
-  const polys: Poly[] = [];
+  const grid = new CourseGrid();
   deduped.forEach(([beat, isStrong], index) => {
     try {
     const section = phraseAt(phrases, beat);
@@ -151,7 +149,7 @@ export function solveMap(music: MusicData, seed: number, skinName: string): { ob
     const angle = separateAngle(bounceAngle(drive, rng), lastAngle, (72 * Math.PI) / 180, rng);
     const prevSeg = segments[segments.length - 1];
     const base = prevSeg ? Math.atan2(prevSeg.y1 - prevSeg.y0, prevSeg.x1 - prevSeg.x0) : heading;
-    const flight = chooseFlight(base, turnSide, angle, length, pos, segments, flownTurns);
+    const flight = chooseFlight(base, turnSide, angle, length, pos, segments, flownTurns, obstacles, grid);
     const bend = flight.bend;
     if (Math.sign(bend) && Math.sign(bend) !== turnSide) {
       turnSide = Math.sign(bend);
@@ -165,9 +163,8 @@ export function solveMap(music: MusicData, seed: number, skinName: string): { ob
     const nextLane = flown;
     const nextSide = turnSide;
     const out = flown + bend * 0.35;
-    let [ovx, ovy] = unit(Math.cos(out), Math.sin(out));
+    const [ovx, ovy] = unit(Math.cos(out), Math.sin(out));
     const planned = out;
-    [hit, ivx, ivy, ovx, ovy] = limitTurn(prevSeg, pos, hit, ivx, ivy, ovx, ovy);
     flownTurns.push(headingDelta(prevSeg, pos, hit));
     const kind = chooseKind(pool, isStrong, counts, lastKind, rng);
     counts[kind] += 1;
@@ -209,7 +206,8 @@ export function solveMap(music: MusicData, seed: number, skinName: string): { ob
       variant,
     });
     segments.push({ t0: tPrev, t1: beat, x0: pos[0], y0: pos[1], x1: hit[0], y1: hit[1], bow });
-    polys.push([pos, hit, bow]);
+    grid.addSegment(segments.length - 1, segments[segments.length - 1]);
+    grid.addWall(obstacles.length - 1, obstacles[obstacles.length - 1]);
     pos = hit;
     tPrev = beat;
     lane = nextLane;
@@ -220,31 +218,26 @@ export function solveMap(music: MusicData, seed: number, skinName: string): { ob
     void flourish;
     } catch {
       pushStraight(obstacles, segments, pos, tPrev, beat, heading, isStrong);
+      grid.addSegment(segments.length - 1, segments[segments.length - 1]);
+      grid.addWall(obstacles.length - 1, obstacles[obstacles.length - 1]);
       const last = obstacles[obstacles.length - 1];
       pos = [last.x, last.y];
       tPrev = beat;
     }
   });
   if (music.duration > tPrev + 1e-3) {
-    try {
-      const [ivx, ivy] = unit(Math.cos(heading), Math.sin(heading));
-      const dist = 680 * (music.duration - tPrev);
-      const guess: Pt = [pos[0] + ivx * dist, pos[1] + ivy * dist];
-      const routed = avoidOverlap(pos, guess, [ivx, ivy], [ivx, ivy], polys, dist, obstacles, segments, tPrev, music.duration, false);
-      const limited = limitTurn(segments[segments.length - 1], pos, routed[0], routed[1], routed[2], routed[3], routed[4]);
-      const end = limited[0];
-      segments.push({
-        t0: tPrev,
-        t1: music.duration,
-        x0: Number.isFinite(pos[0]) ? pos[0] : 0,
-        y0: Number.isFinite(pos[1]) ? pos[1] : 0,
-        x1: Number.isFinite(end[0]) ? end[0] : (Number.isFinite(pos[0]) ? pos[0] : 0) + dist,
-        y1: Number.isFinite(end[1]) ? end[1] : Number.isFinite(pos[1]) ? pos[1] : 0,
-        bow: 0,
-      });
-    } catch {
-      pushStraight(obstacles, segments, pos, tPrev, music.duration, heading, false);
-    }
+    const prev = segments[segments.length - 1];
+    const base = prev ? Math.atan2(prev.y1 - prev.y0, prev.x1 - prev.x0) : heading;
+    const flight = chooseFlight(base, turnSide, (28 * Math.PI) / 180, MIN_SEGMENT, pos, segments, flownTurns, obstacles, grid);
+    segments.push({
+      t0: tPrev,
+      t1: music.duration,
+      x0: Number.isFinite(pos[0]) ? pos[0] : 0,
+      y0: Number.isFinite(pos[1]) ? pos[1] : 0,
+      x1: flight.hit[0],
+      y1: flight.hit[1],
+      bow: 0,
+    });
   }
   try {
     alignNormals(obstacles, segments);
@@ -485,24 +478,182 @@ function fitWindow(turns: number[], bend: number): number {
   return Math.max(lo, Math.min(hi, bend));
 }
 
-function trailCrosses(from: Pt, to: Pt, segments: Segment[]): boolean {
-  const start = Math.max(0, segments.length - 16);
-  for (let index = start; index < segments.length - 1; index++) {
-    const segment = segments[index];
-    if (segmentsCross(from, to, [segment.x0, segment.y0], [segment.x1, segment.y1])) return true;
+/** Drawn wall length. A new leg must stay about this far from every earlier leg and wall. */
+const WALL_BODY = 156;
+const ROUTE_GAP = WALL_BODY * 2.5;
+
+/** Bins segments and wall spines so each new leg can see the whole song, not just the last few bounces. */
+class CourseGrid {
+  private readonly cell = ROUTE_GAP;
+  private readonly segments = new Map<string, number[]>();
+  private readonly walls = new Map<string, number[]>();
+
+  addSegment(index: number, segment: Segment): void {
+    this.drop(this.segments, segment.x0, segment.y0, segment.x1, segment.y1, index);
   }
-  return false;
+
+  addWall(index: number, obstacle: Obstacle): void {
+    const [a, b] = wallSpine(obstacle);
+    this.drop(this.walls, a[0], a[1], b[0], b[1], index);
+  }
+
+  segmentsNear(x0: number, y0: number, x1: number, y1: number): number[] {
+    return this.collect(this.segments, x0, y0, x1, y1, ROUTE_GAP);
+  }
+
+  wallsNear(x0: number, y0: number, x1: number, y1: number): number[] {
+    return this.collect(this.walls, x0, y0, x1, y1, ROUTE_GAP);
+  }
+
+  occupiedCenter(segments: Segment[], x: number, y: number, radius: number): Pt | null {
+    const ids = this.collect(this.segments, x, y, x, y, radius);
+    if (ids.length < 2) return null;
+    let sx = 0;
+    let sy = 0;
+    for (const index of ids) {
+      const segment = segments[index];
+      sx += (segment.x0 + segment.x1) / 2;
+      sy += (segment.y0 + segment.y1) / 2;
+    }
+    return [sx / ids.length, sy / ids.length];
+  }
+
+  private drop(map: Map<string, number[]>, x0: number, y0: number, x1: number, y1: number, index: number): void {
+    for (const key of this.keys(x0, y0, x1, y1, 0)) {
+      const list = map.get(key);
+      if (list) list.push(index);
+      else map.set(key, [index]);
+    }
+  }
+
+  private collect(map: Map<string, number[]>, x0: number, y0: number, x1: number, y1: number, margin: number): number[] {
+    const found = new Set<number>();
+    for (const key of this.keys(x0, y0, x1, y1, margin)) {
+      const list = map.get(key);
+      if (!list) continue;
+      for (const index of list) found.add(index);
+    }
+    return [...found];
+  }
+
+  private keys(x0: number, y0: number, x1: number, y1: number, margin: number): string[] {
+    const minX = Math.min(x0, x1) - margin;
+    const maxX = Math.max(x0, x1) + margin;
+    const minY = Math.min(y0, y1) - margin;
+    const maxY = Math.max(y0, y1) + margin;
+    const i0 = Math.floor(minX / this.cell);
+    const i1 = Math.floor(maxX / this.cell);
+    const j0 = Math.floor(minY / this.cell);
+    const j1 = Math.floor(maxY / this.cell);
+    const keys: string[] = [];
+    for (let i = i0; i <= i1; i++) for (let j = j0; j <= j1; j++) keys.push(`${i}:${j}`);
+    return keys;
+  }
 }
 
-function segmentsCross(a: Pt, b: Pt, c: Pt, d: Pt): boolean {
-  const side = (p: Pt, q: Pt, r: Pt) => (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0]);
-  const ab1 = side(a, b, c);
-  const ab2 = side(a, b, d);
-  const cd1 = side(c, d, a);
-  const cd2 = side(c, d, b);
-  const eps = 2;
-  if (Math.abs(ab1) <= eps || Math.abs(ab2) <= eps || Math.abs(cd1) <= eps || Math.abs(cd2) <= eps) return false;
-  return ab1 * ab2 < 0 && cd1 * cd2 < 0;
+function wallSpine(obstacle: Obstacle): [Pt, Pt] {
+  const half = WALL_BODY / 2;
+  const ox = obstacle.x + obstacle.nx * BALL_R;
+  const oy = obstacle.y + obstacle.ny * BALL_R;
+  return [
+    [ox + obstacle.tx * half, oy + obstacle.ty * half],
+    [ox - obstacle.tx * half, oy - obstacle.ty * half],
+  ];
+}
+
+function candidateSpine(from: Pt, to: Pt): [Pt, Pt] {
+  const [dx, dy] = unit(to[0] - from[0], to[1] - from[1]);
+  const half = WALL_BODY / 2;
+  return [
+    [to[0] - dy * half, to[1] + dx * half],
+    [to[0] + dy * half, to[1] - dx * half],
+  ];
+}
+
+/** Spine of the wall the new leg is leaving, now that its outgoing heading is known. */
+function leavingSpine(pos: Pt, incoming: number, outgoing: number): [Pt, Pt] | null {
+  const normal = normalFrom(Math.cos(incoming), Math.sin(incoming), Math.cos(outgoing), Math.sin(outgoing));
+  if (!normal) return null;
+  const [nx, ny] = normal;
+  const half = WALL_BODY / 2;
+  const cx = pos[0] + nx * BALL_R;
+  const cy = pos[1] + ny * BALL_R;
+  const tx = -ny;
+  const ty = nx;
+  return [
+    [cx + tx * half, cy + ty * half],
+    [cx - tx * half, cy - ty * half],
+  ];
+}
+
+/** A corner shares its bounce with the previous leg, so that pair is only kept from touching. Everything older needs the full gap. */
+const CORNER_GAP = WALL_BODY * 1.5;
+
+/** Smallest gap from a proposed leg, and from the wall it leaves, to every earlier leg and wall. */
+function courseGap(from: Pt, to: Pt, segments: Segment[], obstacles: Obstacle[], grid: CourseGrid): number {
+  const skipSeg = segments.length - 1;
+  const skipWall = obstacles.length - 1;
+  let far = Infinity;
+  let corner = Infinity;
+  const note = (gap: number, near: boolean) => {
+    if (near) corner = Math.min(corner, gap);
+    else far = Math.min(far, gap);
+  };
+  for (const index of grid.segmentsNear(from[0], from[1], to[0], to[1])) {
+    if (index === skipSeg) continue;
+    const segment = segments[index];
+    note(segmentDistance(from, to, [segment.x0, segment.y0], [segment.x1, segment.y1]), index >= skipSeg - 1);
+  }
+  for (const index of grid.wallsNear(from[0], from[1], to[0], to[1])) {
+    if (index === skipWall) continue;
+    const [a, b] = wallSpine(obstacles[index]);
+    note(segmentDistance(from, to, a, b), index >= skipWall - 1);
+  }
+  const prev = segments[skipSeg];
+  if (prev && obstacles.length) {
+    const incoming = Math.atan2(prev.y1 - prev.y0, prev.x1 - prev.x0);
+    const outgoing = Math.atan2(to[1] - from[1], to[0] - from[0]);
+    const spine = leavingSpine(from, incoming, outgoing);
+    if (spine) {
+      const [a, b] = spine;
+      for (const index of grid.segmentsNear(a[0], a[1], b[0], b[1])) {
+        if (index === skipSeg) continue;
+        const segment = segments[index];
+        note(segmentDistance(a, b, [segment.x0, segment.y0], [segment.x1, segment.y1]), index >= skipSeg - 1);
+      }
+    }
+  }
+  const [a, b] = candidateSpine(from, to);
+  for (const index of grid.segmentsNear(a[0], a[1], b[0], b[1])) {
+    if (index === skipSeg) continue;
+    const segment = segments[index];
+    note(segmentDistance(a, b, [segment.x0, segment.y0], [segment.x1, segment.y1]), index >= skipSeg - 1);
+  }
+  if (corner < CORNER_GAP) return corner;
+  return far;
+}
+
+function wrapAngle(angle: number): number {
+  const turn = Math.atan2(Math.sin(angle), Math.cos(angle));
+  return turn;
+}
+
+function flyBend(
+  base: number,
+  bend: number,
+  length: number,
+  pos: Pt,
+  prev: Segment | undefined,
+  turns: number[],
+): { bend: number; hit: Pt; ivx: number; ivy: number } {
+  let fitted = fitWindow(turns, bend);
+  if (sameSideRun(turns, Math.sign(fitted)) >= 3) fitted = fitWindow(turns, -fitted);
+  fitted = Math.max(-MAX_TURN, Math.min(MAX_TURN, fitted));
+  const heading = base + fitted;
+  const [ivx, ivy] = unit(Math.cos(heading), Math.sin(heading));
+  const raw: Pt = [pos[0] + ivx * length, pos[1] + ivy * length];
+  const limited = limitTurn(prev, pos, raw, ivx, ivy, ivx, ivy);
+  return { bend: fitted, hit: limited[0], ivx: limited[1], ivy: limited[2] };
 }
 
 function chooseFlight(
@@ -513,7 +664,17 @@ function chooseFlight(
   pos: Pt,
   segments: Segment[],
   turns: number[],
+  obstacles: Obstacle[],
+  grid: CourseGrid,
 ): { bend: number; hit: Pt; ivx: number; ivy: number } {
+  const prev = segments[segments.length - 1];
+  const n = segments.length;
+  // A slow heading the zigzag leans toward. It swings through the song, so the river is not one bearing.
+  const river =
+    Math.sin(n * 0.018) * ((80 * Math.PI) / 180) + Math.sin(n * 0.006 + 1.1) * ((50 * Math.PI) / 180);
+  const pull = Math.max((-28 * Math.PI) / 180, Math.min((28 * Math.PI) / 180, wrapAngle(river - base)));
+  const center = grid.occupiedCenter(segments, pos[0], pos[1], ROUTE_GAP * 8);
+  const away = center ? Math.atan2(pos[1] - center[1], pos[0] - center[0]) : base + river;
   const magnitudes = [
     angle,
     Math.min((70 * Math.PI) / 180, angle + (18 * Math.PI) / 180),
@@ -521,31 +682,56 @@ function chooseFlight(
     (28 * Math.PI) / 180,
     (52 * Math.PI) / 180,
   ];
-  let fallback: { bend: number; hit: Pt; ivx: number; ivy: number } | null = null;
+  let best: { bend: number; hit: Pt; ivx: number; ivy: number } | null = null;
+  let bestGap = -1;
+  const consider = (bend: number, flightLength: number, turnCap: number, honorWindow: boolean): boolean => {
+    let fitted = honorWindow ? fitWindow(turns, bend) : bend;
+    if (honorWindow && sameSideRun(turns, Math.sign(fitted)) >= 3) fitted = fitWindow(turns, -fitted);
+    fitted = Math.max(-turnCap, Math.min(turnCap, fitted));
+    const heading = base + fitted;
+    const [ivx, ivy] = unit(Math.cos(heading), Math.sin(heading));
+    const raw: Pt = [pos[0] + ivx * flightLength, pos[1] + ivy * flightLength];
+    const limited = turnCap <= MAX_TURN ? limitTurn(prev, pos, raw, ivx, ivy, ivx, ivy) : [raw, ivx, ivy, ivx, ivy] as [Pt, number, number, number, number];
+    const candidate = { bend: fitted, hit: limited[0], ivx: limited[1], ivy: limited[2] };
+    const gap = courseGap(pos, candidate.hit, segments, obstacles, grid);
+    if (gap > bestGap) {
+      bestGap = gap;
+      best = candidate;
+    }
+    return gap + 4 >= ROUTE_GAP;
+  };
   for (const trySide of [side, -side]) {
     for (const magnitude of magnitudes) {
-      let bend = fitWindow(turns, trySide * magnitude);
-      if (sameSideRun(turns, Math.sign(bend)) >= 3) bend = fitWindow(turns, -bend);
-      bend = Math.max(-MAX_TURN, Math.min(MAX_TURN, bend));
-      const heading = base + bend;
-      const [ivx, ivy] = unit(Math.cos(heading), Math.sin(heading));
-      const hit: Pt = [pos[0] + ivx * length, pos[1] + ivy * length];
-      const candidate = { bend, hit, ivx, ivy };
-      if (!fallback) fallback = candidate;
-      if (!trailCrosses(pos, hit, segments)) return candidate;
+      const bend = trySide * magnitude + pull;
+      if (consider(bend, length, MAX_TURN, true)) return best!;
     }
   }
-  const straight = fitWindow(turns, side * MIN_TURN);
-  const heading = base + straight;
-  const [ivx, ivy] = unit(Math.cos(heading), Math.sin(heading));
-  return (
-    fallback ?? {
-      bend: straight,
-      hit: [pos[0] + ivx * length, pos[1] + ivy * length],
-      ivx,
-      ivy,
+  const offsets = [0, 18, -18, 36, -36, 55, -55, 75, -75];
+  for (const flightLength of [length, 520]) {
+    for (const degrees of offsets) {
+      const bend = wrapAngle(away + (degrees * Math.PI) / 180 - base);
+      if (Math.abs(bend) > MAX_TURN + 1e-3) continue;
+      if (consider(bend, flightLength, MAX_TURN, true)) return best!;
     }
-  );
+  }
+  // The local turn cap is full of old path. Step out toward open ground.
+  for (const flightLength of [780, 1100]) {
+    for (const degrees of [0, 25, -25, 50, -50, 80, -80, 110, -110]) {
+      const bend = wrapAngle(away + (degrees * Math.PI) / 180 - base);
+      if (Math.abs(bend) > (150 * Math.PI) / 180) continue;
+      if (consider(bend, flightLength, (150 * Math.PI) / 180, false)) return best!;
+    }
+  }
+  if (bestGap + 4 < ROUTE_GAP) {
+    for (const flightLength of [1400, 2200, 3200]) {
+      const steps = 24;
+      for (let step = 0; step < steps; step++) {
+        const bend = wrapAngle((step / steps) * Math.PI * 2 - base);
+        if (consider(bend, flightLength, Math.PI, false)) return best!;
+      }
+    }
+  }
+  return best ?? flyBend(base, side * MIN_TURN, length, pos, prev, turns);
 }
 
 function separateAngle(angle: number, previous: number, limit: number, rng: { v: number }): number {
@@ -718,110 +904,6 @@ function aimsInto(origin: Pt, angle: number, obstacles: Obstacle[]): boolean {
   return (Math.cos(angle) * vx + Math.sin(angle) * vy) / dist > 0.3;
 }
 
-function avoidOverlap(
-  pos: Pt,
-  hit: Pt,
-  incoming: Pt,
-  outgoing: Pt,
-  polys: Poly[],
-  length: number,
-  obstacles: Obstacle[],
-  segments: Segment[],
-  t0: number,
-  t1: number,
-  allowBend: boolean,
-): [Pt, number, number, number, number] {
-  const ix = incoming[0];
-  const iy = incoming[1];
-  const ox = outgoing[0];
-  const oy = outgoing[1];
-  const flown = flownPoints(segments);
-  const angles = [0];
-  for (const degrees of [12, 22, 34, 46]) angles.push(degrees, -degrees);
-  const search = (originIn: Pt, originOut: Pt, chords: number[], yaw: number[]) => {
-    let best: [number, Pt, number, number, number, number] | null = null;
-    for (const chord of chords) {
-      if (chord < 24) continue;
-      for (const degrees of yaw) {
-        const rad = (degrees * Math.PI) / 180;
-        const cosine = Math.cos(rad);
-        const sine = Math.sin(rad);
-        const ux = originIn[0] * cosine - originIn[1] * sine;
-        const uy = originIn[0] * sine + originIn[1] * cosine;
-        const vx = originOut[0] * cosine - originOut[1] * sine;
-        const vy = originOut[0] * sine + originOut[1] * cosine;
-        const candidate: Pt = [pos[0] + ux * chord, pos[1] + uy * chord];
-        if (blocked(pos, candidate, polys)) continue;
-        const pen = legSolidPen(pos, candidate, 0, t0, t1, obstacles, segments, flown);
-        if (pen <= 1e-6) return { found: [candidate, ux, uy, vx, vy] as [Pt, number, number, number, number], best };
-        if (!best || pen < best[0]) best = [pen, candidate, ux, uy, vx, vy];
-      }
-    }
-    return { found: null, best };
-  };
-  const probe = () => {
-    let result = search([ix, iy], [ox, oy], [length, length * 0.78, length * 0.58, length * 0.4, length * 0.28], angles);
-    if (result.found) return result;
-    for (const extra of [24, -24, 40, -40]) {
-      const rad = (extra * Math.PI) / 180;
-      const cosine = Math.cos(rad);
-      const sine = Math.sin(rad);
-      const ex = ox * cosine - oy * sine;
-      const ey = ox * sine + oy * cosine;
-      const alt = search([ix, iy], [ex, ey], [length, length * 0.62, length * 0.4], [0, 16, -16, 32, -32, 46, -46]);
-      if (alt.found) return { found: alt.found, best: result.best };
-      if (alt.best && (!result.best || alt.best[0] < result.best[0])) result = { found: null, best: alt.best };
-    }
-    if (allowBend && Math.hypot(ix - ox, iy - oy) > 1e-3) {
-      const [nx, ny] = unit(ix - ox, iy - oy);
-      const tx = -iy;
-      const ty = ix;
-      for (const bend of [0.35, -0.35, 0.6, -0.6]) {
-        const [ux, uy] = unit(ix + tx * bend, iy + ty * bend);
-        const candidate: Pt = [pos[0] + ux * length, pos[1] + uy * length];
-        if (blocked(pos, candidate, polys)) continue;
-        const [vx, vy] = reflect(ux, uy, nx, ny);
-        const pen = legSolidPen(pos, candidate, 0, t0, t1, obstacles, segments, flown);
-        if (pen <= 1e-6) return { found: [candidate, ux, uy, vx, vy] as [Pt, number, number, number, number], best: result.best };
-        if (!result.best || pen < result.best[0]) result = { found: null, best: [pen, candidate, ux, uy, vx, vy] };
-      }
-    }
-    return result;
-  };
-  let { found, best } = probe();
-  if (found) return found;
-  for (let pass = 0; pass < 3; pass++) {
-    if (!best || !obstacles.length) break;
-    if (!shrinkBlockers(pos, best[1], t0, t1, obstacles, segments, flown)) break;
-    const retry = probe();
-    if (retry.found) return retry.found;
-    if (retry.best && (!best || retry.best[0] < best[0])) best = retry.best;
-    else break;
-  }
-  if (best) return [best[1], best[2], best[3], best[4], best[5]];
-  for (const origin of [[ix, iy], [-ix, -iy]] as Pt[]) {
-    for (const chord of [length, length * 0.55, Math.max(24, length * 0.3)]) {
-      for (const degrees of angles) {
-        const rad = (degrees * Math.PI) / 180;
-        const cosine = Math.cos(rad);
-        const sine = Math.sin(rad);
-        const ux = origin[0] * cosine - origin[1] * sine;
-        const uy = origin[0] * sine + origin[1] * cosine;
-        const candidate: Pt = [pos[0] + ux * chord, pos[1] + uy * chord];
-        if (blocked(pos, candidate, polys)) continue;
-        const vx = ox * cosine - oy * sine;
-        const vy = ox * sine + oy * cosine;
-        return [candidate, ux, uy, vx, vy];
-      }
-    }
-  }
-  return [hit, ix, iy, ox, oy];
-}
-
-function reflect(ix: number, iy: number, nx: number, ny: number): Pt {
-  const dot = ix * nx + iy * ny;
-  return unit(ix - 2 * dot * nx, iy - 2 * dot * ny);
-}
 
 function bulge(a: Pt, b: Pt, bow: number, u: number): Pt {
   const x = a[0] + (b[0] - a[0]) * u;
@@ -877,14 +959,6 @@ function alignNormals(obstacles: Obstacle[], segments: Segment[]): void {
   });
 }
 
-function polyPieces(a: Pt, b: Pt, bow: number): [Pt, Pt][] {
-  if (Math.abs(bow) < 1e-3) return [[a, b]];
-  const points = [0, 0.25, 0.5, 0.75, 1].map((u) => bulge(a, b, bow, u));
-  const pieces: [Pt, Pt][] = [];
-  for (let index = 0; index < points.length - 1; index++) pieces.push([points[index], points[index + 1]]);
-  return pieces;
-}
-
 function segmentDistance(a: Pt, b: Pt, c: Pt, d: Pt): number {
   const d1x = b[0] - a[0];
   const d1y = b[1] - a[1];
@@ -914,38 +988,6 @@ function segmentDistance(a: Pt, b: Pt, c: Pt, d: Pt): number {
   return Math.hypot(cx1 - cx2, cy1 - cy2);
 }
 
-function intersects(a: Pt, b: Pt, c: Pt, d: Pt): boolean {
-  const cross = (p: Pt, q: Pt, r: Pt) => (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0]);
-  const straddles = (p: Pt, q: Pt, r: Pt, s: Pt) => cross(p, q, r) * cross(p, q, s) < 0;
-  return straddles(a, b, c, d) && straddles(c, d, a, b);
-}
-
-function foldsBack(a: Pt, b: Pt, p: Pt, q: Pt): boolean {
-  if (intersects(a, b, p, q) && Math.hypot(b[0] - a[0], b[1] - a[1]) > 24) return true;
-  for (let step = 2; step < 7; step++) {
-    const u = step / 6;
-    const point: Pt = [a[0] + (b[0] - a[0]) * u, a[1] + (b[1] - a[1]) * u];
-    if (Math.hypot(point[0] - a[0], point[1] - a[1]) < 80) continue;
-    if (segmentDistance(point, point, p, q) < 18) return true;
-  }
-  return false;
-}
-
-function blocked(a: Pt, b: Pt, polys: Poly[]): boolean {
-  for (let index = 0; index < polys.length; index++) {
-    const [c, d, bow] = polys[index];
-    const recent = index === polys.length - 1;
-    for (const [p, q] of polyPieces(c, d, bow)) {
-      if (recent) {
-        if (foldsBack(a, b, p, q) || segmentDistance(b, b, p, q) < CLEARANCE) return true;
-        continue;
-      }
-      if (intersects(a, b, p, q) || segmentDistance(a, b, p, q) < CLEARANCE) return true;
-    }
-  }
-  return false;
-}
-
 function iterPoints(a: Pt, b: Pt, bow: number, t0: number, t1: number, step = 8): [number, number, number][] {
   const length = Math.hypot(b[0] - a[0], b[1] - a[1]);
   const steps = Math.max(1, Math.ceil(length / step));
@@ -956,12 +998,6 @@ function iterPoints(a: Pt, b: Pt, bow: number, t0: number, t1: number, step = 8)
     const [x, y] = bulge(a, b, bow, u);
     points.push([x, y, t0 + span * u]);
   }
-  return points;
-}
-
-function flownPoints(segments: Segment[]): [number, number, number][] {
-  const points: [number, number, number][] = [];
-  for (const seg of segments) points.push(...iterPoints([seg.x0, seg.y0], [seg.x1, seg.y1], seg.bow, seg.t0, seg.t1));
   return points;
 }
 
@@ -1043,87 +1079,6 @@ function countPen(obs: Obstacle, px: number, py: number, time: number, normal: P
   if (pen <= 0) return 0;
   if (Math.abs(time - obs.hitTime) <= 0.5 / 30 + 1e-4) pen -= SOLID_EPS;
   return pen > 0 ? pen : 0;
-}
-
-function legSolidPen(
-  a: Pt,
-  b: Pt,
-  bow: number,
-  t0: number,
-  t1: number,
-  obstacles: Obstacle[],
-  segments: Segment[],
-  flown: [number, number, number][],
-): number {
-  if (!obstacles.length) return 0;
-  const overrides = new Map<number, Pt>();
-  if (segments.length) {
-    const normal = normalFrom(...tangent(segments[segments.length - 1], true), ...tangentOf(a, b, bow, false));
-    if (!normal) return 1e6;
-    overrides.set(obstacles.length - 1, normal);
-  }
-  let worst = 0;
-  for (const [px, py, time] of iterPoints(a, b, bow, t0, t1)) {
-    obstacles.forEach((obs, index) => {
-      worst = Math.max(worst, countPen(obs, px, py, time, overrides.get(index) ?? null));
-    });
-  }
-  if (flown.length && overrides.size) {
-    const normal = overrides.get(obstacles.length - 1)!;
-    const obs = obstacles[obstacles.length - 1];
-    for (const [px, py, time] of flown) worst = Math.max(worst, countPen(obs, px, py, time, normal));
-  }
-  return worst;
-}
-
-function shrinkBlockers(
-  pos: Pt,
-  candidate: Pt,
-  t0: number,
-  t1: number,
-  obstacles: Obstacle[],
-  segments: Segment[],
-  flown: [number, number, number][],
-): boolean {
-  const points = iterPoints(pos, candidate, 0, t0, t1);
-  const normal = segments.length ? normalFrom(...tangent(segments[segments.length - 1], true), ...tangentOf(pos, candidate, 0, false)) : null;
-  let changed = false;
-  obstacles.forEach((obs, index) => {
-    const use = index === obstacles.length - 1 ? normal : null;
-    const pen = () => {
-      let worst = 0;
-      for (const [px, py, time] of points) worst = Math.max(worst, countPen(obs, px, py, time, use));
-      if (use) for (const [px, py, time] of flown) worst = Math.max(worst, countPen(obs, px, py, time, use));
-      return worst;
-    };
-    if (relax(obs, pen)) changed = true;
-  });
-  return changed;
-}
-
-function relax(obs: Obstacle, pen: () => number): boolean {
-  if (pen() <= 1e-6) return false;
-  const originalVariant = obs.variant;
-  const originalSize = Math.max(obs.size, 1);
-  const originalPeg = obs.pegR;
-  const variants = [originalVariant];
-  for (const name of SIMPLER[originalVariant] ?? []) if (!variants.includes(name)) variants.push(name);
-  const sizes: number[] = [];
-  let size = originalSize;
-  while (size > 18) {
-    size = Math.max(18, size * 0.72);
-    sizes.push(size);
-  }
-  for (const variant of variants) {
-    const trySizes = variant === originalVariant ? sizes : [originalSize, ...sizes];
-    for (const next of trySizes) {
-      obs.variant = variant;
-      obs.size = next;
-      if (obs.kind === "peg") obs.pegR = Math.max(10, originalPeg * next / originalSize);
-      if (pen() <= 1e-6) return true;
-    }
-  }
-  return true;
 }
 
 function capSize(hit: Pt, size: number, obstacles: Obstacle[]): number {

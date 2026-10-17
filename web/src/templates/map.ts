@@ -176,30 +176,11 @@ export function auditMap(state: MapState): {
   };
 }
 
-/** Recent bounces the fading trail still draws. Walls stay on the map for the whole song. */
-const HISTORY = 12;
-
-function recentRange(obstacles: Obstacle[], time: number): { from: number; to: number } {
-  let to = obstacles.length;
-  while (to > 0 && obstacles[to - 1].hitTime > time + 1e-3) to -= 1;
-  return { from: Math.max(0, to - HISTORY), to };
-}
-
-/** Start of the leg that arrives at the oldest visible wall, so that wall still has a trail. */
-function historyStart(segments: Segment[], obstacles: Obstacle[], time: number): number {
-  const { from, to } = recentRange(obstacles, time);
-  if (from >= to) return segments[0]?.t0 ?? 0;
-  const oldest = obstacles[from].hitTime;
-  for (const segment of segments) {
-    if (Math.abs(segment.t1 - oldest) < 1e-2) return segment.t0;
-  }
-  return Math.max(segments[0]?.t0 ?? 0, oldest);
-}
-
-function ageFade(time: number, when: number, start: number): number {
-  const span = Math.max(0.25, time - start);
-  const along = clamp(1 - (time - when) / span, 0, 1);
-  return 0.5 + 0.5 * along;
+/** Recent trail stays bright, then settles to a floor that never disappears. */
+function trailFade(time: number, when: number): number {
+  const age = Math.max(0, time - when);
+  const along = clamp(1 - age / 7, 0, 1);
+  return 0.22 + 0.78 * along;
 }
 
 function beatPulse(beats: number[], time: number): number {
@@ -463,8 +444,7 @@ function paintMap(
     (x - camX) * zoom + state.width / 2,
     (y - camY) * zoom + state.height / 2,
   ];
-  const trailStart = historyStart(state.segments, state.obstacles, time);
-  paintCourse(ctx, state, time, trailStart, project, zoom);
+  paintCourse(ctx, state, time, state.segments[0]?.t0 ?? 0, project, zoom);
   for (const obstacle of state.obstacles) paintObstacle(ctx, state, obstacle, time, project, zoom);
   paintRings(ctx, state, time, project, zoom);
   const radius = state.ballR * zoom * (1 + 0.4 * pulse);
@@ -487,8 +467,8 @@ function paintCourse(
     return { x, y, t: point.t };
   });
   if (points.length < 2) return;
-  paintRibbon(ctx, points, time, start, 20 * zoom, state.skin.ball, state.light ? 0.28 : 0.42);
-  paintRibbon(ctx, points, time, start, 5 * zoom, [1, 1, 1], state.light ? 0.62 : 0.95);
+  paintRibbon(ctx, points, time, 20 * zoom, state.skin.ball, state.light ? 0.28 : 0.42);
+  paintRibbon(ctx, points, time, 5 * zoom, [1, 1, 1], state.light ? 0.62 : 0.95);
 }
 
 function coursePoints(state: MapState, time: number, start: number): { x: number; y: number; t: number }[] {
@@ -516,7 +496,6 @@ function paintRibbon(
   ctx: CanvasRenderingContext2D,
   points: { x: number; y: number; t: number }[],
   time: number,
-  start: number,
   width: number,
   color: [number, number, number],
   alpha: number,
@@ -536,7 +515,7 @@ function paintRibbon(
     right.push({ x: points[index].x + dy * half, y: points[index].y - dx * half });
   }
   for (let index = 1; index < points.length; index++) {
-    const fade = ageFade(time, points[index].t, start);
+    const fade = trailFade(time, points[index].t);
     ctx.fillStyle = rgba(color[0], color[1], color[2], alpha * fade);
     ctx.beginPath();
     ctx.moveTo(left[index - 1].x, left[index - 1].y);
