@@ -2,7 +2,7 @@
 
 Each form is closed-form in time. A building finishes on its beat, a note head
 meets its key on the onset, and a star reaches full brightness on its note.
-The camera only eases toward a slow target.
+The city camera leads the next towers, then eases back to the whole skyline.
 """
 
 from __future__ import annotations
@@ -145,28 +145,61 @@ class CityScene:
                 pulse = max(pulse, _smooth(1.0 - age / 0.18))
         return pulse
 
+    def _cover_index(self, time: float) -> int:
+        """Rightmost tower that should already be inside the frame.
+
+        Growth is anticipated from the timeline: every tower whose rise begins
+        within the lead, plus the one after it. The damped camera then arrives
+        before either of them starts.
+        """
+        if not self.buildings:
+            return -1
+        ready = time + 2.8
+        last = 0
+        for index, building in enumerate(self.buildings):
+            if building.born - building.grow <= ready:
+                last = index
+            else:
+                break
+        return min(len(self.buildings) - 1, last + 1)
+
     def _target(self, time: float) -> tuple[float, float]:
         if not self.buildings:
             return 0.0, 1.0
-        span = max(1e-3, self.duration)
-        u = _smooth(max(0.0, min(1.0, time / span)))
-        first = self.buildings[0]
-        start_x = first.x + first.width * 0.5
-        end_x = 0.0
-        total = (self.buildings[-1].x + self.buildings[-1].width) - self.buildings[0].x
-        fit = (self.width * 0.86) / max(total, 1.0)
-        end_zoom = min(0.96, fit)
-        start_zoom = min(1.48, end_zoom * 1.65)
-        zoom = start_zoom + (end_zoom - start_zoom) * u + 0.04 * self.street_glow(time)
-        x = start_x + (end_x - start_x) * u
-        return x, zoom
+        end = self._cover_index(time)
+        left = self.buildings[0].x
+        right = self.buildings[end].x + self.buildings[end].width
+        span = max(1.0, right - left)
+        pad = max(48.0, span * 0.05)
+        left -= pad
+        right += pad
+        span = right - left
+        # 12% inset in the target. The damped camera tracks this closely, and
+        # the finished skyline still clears the 10% margin.
+        zoom = min(1.50, (self.width * 0.76) / span)
+        return (left + right) * 0.5, max(0.62, zoom)
+
+    def screen_box(self, building: Building, risen: float | None = None) -> tuple[float, float, float, float]:
+        """Screen left, top, right, bottom of the tower body at the current camera."""
+        if risen is None:
+            risen = self.building_height(building)
+        ground = self.height * 0.78
+        zoom = self.cam_zoom
+        left = self.width * 0.5 + (building.x - self.cam_x) * zoom
+        right = self.width * 0.5 + (building.x + building.width - self.cam_x) * zoom
+        bottom = ground
+        top = ground - max(0.0, risen) * zoom
+        return left, top, right, bottom
 
     def update(self, dt: float, time: float, events: list[tuple[float, bool]]) -> None:
         del events
         self.time = time
         target_x, target_zoom = self._target(time)
-        self._cam_x = _damp(self._cam_x, target_x, dt, 1.6)
-        self._cam_zoom = _damp(self._cam_zoom, target_zoom, dt, 1.6)
+        self._cam_x = _damp(self._cam_x, target_x, dt, 2.6)
+        # Zooming out is the direction that uncovers a new tower. Catch that
+        # faster than a pan, and don't punch back in on a bass hit.
+        zoom_rate = 3.6 if target_zoom < self._cam_zoom else 1.6
+        self._cam_zoom = _damp(self._cam_zoom, target_zoom, dt, zoom_rate)
         self.cam_x = self._cam_x
         self.cam_zoom = self._cam_zoom
 

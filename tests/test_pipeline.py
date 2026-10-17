@@ -267,6 +267,9 @@ class PipelineTest(unittest.TestCase):
             self.assertGreater(sum(hot) / len(hot), sum(calm) / len(calm))
         self.assertEqual(city.timing["max_timing_error_s"], 0.0)
         self.assertGreater(len(city.bass_times), 0)
+        framed = _growth_starts_in_frame(city, analysis)
+        self.assertEqual(framed, len(city.buildings))
+        self.assertGreater(framed, 0)
 
         piano = build_scene("piano", 1920, 1080, analysis, 42, "neon")
         self.assertGreaterEqual(len(piano.notes), 8)
@@ -300,6 +303,51 @@ class PipelineTest(unittest.TestCase):
             scene.update(1 / 30, min(1.0, analysis.duration * 0.5), [])
             frame = renderer.draw(scene)
             self.assertEqual(len(frame), 640 * 360 * 4)
+
+
+def _growth_starts_in_frame(city, analysis, fps: int = 30) -> int:
+    """Step like the CLI. Count towers whose body is inside a 10% margin at growth start.
+
+    The next tower, the one about to grow, has to clear the same margin on that frame.
+    """
+    dt = 1.0 / fps
+    nframes = int(math.floor(analysis.duration * fps + 1e-6))
+    beats = [float(beat) for beat in analysis.beats]
+    beat_index = 0
+    seen: set[int] = set()
+    for frame in range(nframes):
+        t0 = frame * dt
+        t1 = t0 + dt
+        events: list[tuple[float, bool]] = []
+        while beat_index < len(beats) and beats[beat_index] < t1 - 1e-9:
+            if beats[beat_index] >= t0 - 1e-9:
+                events.append((beats[beat_index], False))
+            beat_index += 1
+        sample = events[0][0] if events else t0
+        city.update(dt, sample, events)
+        for index, building in enumerate(city.buildings):
+            if index in seen or city.time + 1e-9 < building.born - building.grow:
+                continue
+            _assert_box_margin(city, building, 0.0)
+            if index + 1 < len(city.buildings):
+                _assert_box_margin(city, city.buildings[index + 1], 0.0)
+            seen.add(index)
+    return len(seen)
+
+
+def _assert_box_margin(city, building, risen: float) -> None:
+    left, top, right, bottom = city.screen_box(building, risen)
+    margin = 0.10
+    if left < city.width * margin or right > city.width * (1.0 - margin):
+        raise AssertionError(
+            f"building x={building.x:.1f} horizontal margin {left:.1f}..{right:.1f} "
+            f"on {city.width:.0f} at t={city.time:.3f}"
+        )
+    if top < city.height * margin or bottom > city.height * (1.0 - margin):
+        raise AssertionError(
+            f"building x={building.x:.1f} vertical margin {top:.1f}..{bottom:.1f} "
+            f"on {city.height:.0f} at t={city.time:.3f}"
+        )
 
 
 def _segments_cross(a, b, c, d) -> bool:
