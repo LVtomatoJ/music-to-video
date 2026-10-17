@@ -158,7 +158,7 @@ function seatFigure(
     const cx = marginX + rng() * Math.max(1, width - 2 * marginX);
     const cy = marginY + rng() * Math.max(1, skyBottom - 2 * marginY);
     const clear = clearance(cx, cy, radius, placed, start, end);
-    if (clear >= 36 * unit) return [cx, cy];
+    if (clear >= 28 * unit) return [cx, cy];
     if (clear > bestClear) {
       best = [cx, cy];
       bestClear = clear;
@@ -306,7 +306,7 @@ function brightness(star: Star, time: number): number {
   if (age <= 0) return smoothstep((age + 0.24) / 0.24);
   const twinkle = 0.84 + 0.16 * Math.sin(time * 1.5 + star.phase);
   const flare = 1 + 0.55 * Math.exp(-age * 3.2);
-  const fade = age < 7 ? 1 : smoothstep(1 - Math.min(1, (age - 7) / 5));
+  const fade = age < 12 ? 1 : smoothstep(1 - Math.min(1, (age - 12) / 6));
   return Math.min(1.45, twinkle * flare * fade);
 }
 
@@ -347,8 +347,8 @@ function paintStars(
     const a = state.stars[left];
     const b = state.stars[right];
     const age = time - Math.max(a.time, b.time);
-    if (age < 0) continue;
-    const appear = smoothstep(Math.min(1, age / 0.45));
+    if (age < -0.7) continue;
+    const appear = age < 0 ? 0.35 * smoothstep((age + 0.7) / 0.7) : smoothstep(Math.min(1, age / 0.45));
     const alpha = age < 5 ? appear * 0.72 : Math.max(0.05, 0.72 * smoothstep(1 - (age - 5) / 6));
     const color = tint((a.warmth + b.warmth) * 0.5);
     ctx.strokeStyle = rgba(color[0], color[1], color[2], alpha);
@@ -360,6 +360,15 @@ function paintStars(
   }
   for (const star of state.stars) {
     const age = time - star.time;
+    if (age < -0.9) continue;
+    if (age < -0.24) {
+      const hint = smoothstep((age + 0.9) / 0.66) * 0.35;
+      ctx.fillStyle = rgba(0.85, 0.9, 1, hint);
+      ctx.beginPath();
+      ctx.arc(star.x, star.y, (2.2 + star.scale) * state.unit, 0, TAU);
+      ctx.fill();
+      continue;
+    }
     const level = brightness(star, time);
     if (level <= 0.02) continue;
     if (age >= 0 && age < 0.48) {

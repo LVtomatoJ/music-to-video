@@ -57,7 +57,6 @@ const NIGHT = [
 ] as const;
 
 const ACCENT: [number, number, number] = [1, 0.78, 0.42];
-const ACCENT2: [number, number, number] = [0.49, 0.855, 0.965];
 
 const cityParams = {
   seed: { type: "number", label: "种子", min: 1, max: 999, step: 1, default: 42, scope: "plan" },
@@ -305,7 +304,7 @@ function bakeCamera(width: number, buildings: Building[], beats: number[], secti
       camZ = damp(camZ, tz, BAKE_DT, tz < camZ ? 3.6 : 1.6);
     }
     const energy = sectionEnergy(sections, time);
-    const push = 0.016 * timesPulse(beats, time, 0.04, 0.16) * (0.4 + 0.6 * energy);
+    const push = 0.04 * timesPulse(beats, time, 0.04, 0.18) * (0.45 + 0.55 * energy);
     x[i] = camX;
     z[i] = camZ * (1 + push);
   }
@@ -553,126 +552,89 @@ function paintWindows(
 
 function paintStreet(ctx: CanvasRenderingContext2D, state: CityState, time: number, glow: number, pulse: number): void {
   if (!state.buildings.length) return;
-  const left = state.buildings[0].x - 120 * state.unit;
-  const right = state.buildings[state.buildings.length - 1].x + state.buildings[state.buildings.length - 1].width + 120 * state.unit;
-  const span = Math.max(240 * state.unit, right - left);
-  const roadH = 168 * state.unit;
-  ctx.fillStyle = rgb(0.012, 0.014, 0.022);
-  ctx.fillRect(left - 280 * state.unit, 0, span + 560 * state.unit, roadH);
-  const wash = ctx.createLinearGradient(0, 0, 0, 36 * state.unit);
-  wash.addColorStop(0, rgba(1, 0.86, 0.58, 0.08 + 0.55 * glow + 0.7 * pulse));
-  wash.addColorStop(1, rgba(ACCENT2[0], ACCENT2[1], ACCENT2[2], 0));
-  ctx.fillStyle = wash;
-  ctx.fillRect(left - 280 * state.unit, 0, span + 560 * state.unit, 36 * state.unit);
-  paintReflections(ctx, state, time);
-  if (pulse > 0.04) {
-    ctx.fillStyle = rgba(1, 0.9, 0.7, 0.22 * pulse);
-    ctx.fillRect(left - 280 * state.unit, 2 * state.unit, span + 560 * state.unit, 5 * state.unit);
-  }
-  ctx.fillStyle = rgba(0.78, 0.82, 0.88, 0.22);
-  for (let dash = left; dash < right; dash += 64 * state.unit) ctx.fillRect(dash, 78 * state.unit, 28 * state.unit, 2.4 * state.unit);
-  paintTram(ctx, state, left, span, time, energyArea(state.sections, time) * 42 * state.unit, Math.max(glow, pulse));
-  const lanes: [number, number, number][] = [
-    [44, 8, 1],
-    [112, 12, -1],
-  ];
-  for (let index = 0; index < 6; index++) {
-    const [lane, thick, direction] = lanes[index % 2];
-    const speed = (170 + (index % 4) * 55 + (direction < 0 ? 40 : 0)) * state.unit;
-    const length = (190 + 90 * Math.max(pulse, 0.45 * glow) + (index % 3) * 24) * state.unit;
-    const travel =
-      (time * speed + energyArea(state.sections, time) * (64 + (index % 3) * 16) * state.unit + (index * span) / 6) %
-      (span + length + 80 * state.unit);
-    paintHeadlight(ctx, state, left, right, lane * state.unit, thick * state.unit, direction, length, travel, pulse);
-  }
+  const unit = state.unit;
+  const left = state.buildings[0].x - 40 * unit;
+  const right = state.buildings[state.buildings.length - 1].x + state.buildings[state.buildings.length - 1].width + 40 * unit;
+  const span = Math.max(240 * unit, right - left);
+  const roadH = 92 * unit;
+  const road = ctx.createLinearGradient(0, 0, 0, roadH + 70 * unit);
+  road.addColorStop(0, rgb(0.045, 0.04, 0.05));
+  road.addColorStop(0.16, rgb(0.02, 0.02, 0.028));
+  road.addColorStop(0.55, rgb(0.012, 0.012, 0.018));
+  road.addColorStop(1, rgb(0.008, 0.008, 0.012));
+  ctx.fillStyle = road;
+  ctx.fillRect(left - 80 * unit, 0, span + 160 * unit, roadH + 70 * unit);
+  const curb = ctx.createLinearGradient(0, 0, 0, 10 * unit);
+  curb.addColorStop(0, rgba(1, 0.86, 0.55, 0.22 + 0.55 * pulse + 0.18 * glow));
+  curb.addColorStop(1, rgba(0.49, 0.85, 0.96, 0));
+  ctx.fillStyle = curb;
+  ctx.fillRect(left - 80 * unit, 0, span + 160 * unit, 10 * unit);
+  paintReflections(ctx, state, time, pulse);
+  ctx.fillStyle = rgba(0.75, 0.8, 0.86, 0.14);
+  const laneY = 46 * unit;
+  for (let dash = left; dash < right; dash += 86 * unit) ctx.fillRect(dash, laneY, 18 * unit, 1.6 * unit);
+  const boost = energyArea(state.sections, time);
+  paintLane(ctx, state, left, span, time, boost, 26 * unit, 1, 0, pulse);
+  paintLane(ctx, state, left, span, time, boost, 68 * unit, -1, span * 0.47, pulse);
 }
 
-function paintReflections(ctx: CanvasRenderingContext2D, state: CityState, time: number): void {
+function paintReflections(ctx: CanvasRenderingContext2D, state: CityState, time: number, pulse: number): void {
   for (const building of state.buildings) {
     const risen = buildingHeight(building, time);
-    if (risen < 12 * state.unit) continue;
-    const smear = Math.min(78 * state.unit, risen * 0.28);
-    for (let col = 0; col < building.cols; col++) {
-      const x = building.x + (building.width * (col + 0.5)) / building.cols - 1.4 * state.unit;
-      const grad = ctx.createLinearGradient(0, 8 * state.unit, 0, 8 * state.unit + smear);
-      grad.addColorStop(0, rgba(1, 0.78, 0.45, 0.22));
-      grad.addColorStop(1, rgba(1, 0.7, 0.4, 0));
-      ctx.fillStyle = grad;
-      ctx.fillRect(x, 12 * state.unit, 2.8 * state.unit, smear);
+    if (risen < 16 * state.unit) continue;
+    const body = NIGHT[building.tint % NIGHT.length];
+    const smear = Math.min(64 * state.unit, risen * 0.2);
+    const grad = ctx.createLinearGradient(0, 6 * state.unit, 0, 6 * state.unit + smear);
+    const alpha = 0.16 + 0.1 * pulse;
+    grad.addColorStop(0, rgba(body[0] + 0.25, body[1] + 0.18, body[2] + 0.12, alpha));
+    grad.addColorStop(1, rgba(body[0], body[1], body[2], 0));
+    ctx.fillStyle = grad;
+    ctx.fillRect(building.x + building.width * 0.12, 8 * state.unit, building.width * 0.76, smear);
+    const cols = Math.min(building.cols, 4);
+    for (let col = 0; col < cols; col++) {
+      const x = building.x + (building.width * (col + 0.5)) / cols - 1.1 * state.unit;
+      const column = ctx.createLinearGradient(0, 10 * state.unit, 0, 10 * state.unit + smear * 0.85);
+      column.addColorStop(0, rgba(1, 0.8, 0.46, 0.28 + 0.2 * pulse));
+      column.addColorStop(1, rgba(1, 0.72, 0.36, 0));
+      ctx.fillStyle = column;
+      ctx.fillRect(x, 12 * state.unit, 2.2 * state.unit, smear * 0.85);
     }
   }
 }
 
-function paintTram(
+function paintLane(
   ctx: CanvasRenderingContext2D,
   state: CityState,
   left: number,
   span: number,
   time: number,
   boost: number,
-  flare: number,
-): void {
-  const tramW = 340 * state.unit;
-  const tramH = 32 * state.unit;
-  const tramX = left + ((time * 78 * state.unit + boost) % (span + tramW + 160 * state.unit)) - tramW;
-  const y = 14 * state.unit;
-  ctx.fillStyle = rgba(0.04, 0.045, 0.06, 0.98);
-  roundRect(ctx, tramX, y, tramW, tramH, 5 * state.unit);
-  ctx.fill();
-  ctx.strokeStyle = rgba(0.55, 0.62, 0.7, 0.35);
-  ctx.lineWidth = 1.4 * state.unit;
-  ctx.beginPath();
-  ctx.moveTo(tramX + tramW * 0.5, y);
-  ctx.lineTo(tramX + tramW * 0.5, y - 16 * state.unit);
-  ctx.moveTo(tramX + tramW * 0.38, y - 16 * state.unit);
-  ctx.lineTo(tramX + tramW * 0.62, y - 16 * state.unit);
-  ctx.stroke();
-  const window = ctx.createLinearGradient(tramX, 0, tramX + tramW, 0);
-  window.addColorStop(0, rgba(1, 0.78, 0.42, 0));
-  window.addColorStop(0.08, rgba(1, 0.82, 0.48, 0.28 + 0.45 * flare));
-  window.addColorStop(0.92, rgba(1, 0.82, 0.48, 0.28 + 0.45 * flare));
-  window.addColorStop(1, rgba(1, 0.78, 0.42, 0));
-  ctx.fillStyle = window;
-  ctx.fillRect(tramX + 18 * state.unit, y + 8 * state.unit, tramW - 36 * state.unit, 8 * state.unit);
-  const beam = (180 + 140 * flare) * state.unit;
-  const head = ctx.createLinearGradient(tramX + tramW - 8 * state.unit, 0, tramX + tramW + beam, 0);
-  head.addColorStop(0, rgba(0.8, 0.94, 1, 0.9));
-  head.addColorStop(1, rgba(0.8, 0.94, 1, 0));
-  ctx.fillStyle = head;
-  ctx.fillRect(tramX + tramW - 8 * state.unit, y + 14 * state.unit, beam, 8 * state.unit);
-}
-
-function paintHeadlight(
-  ctx: CanvasRenderingContext2D,
-  state: CityState,
-  left: number,
-  right: number,
   lane: number,
-  thick: number,
   direction: number,
-  length: number,
-  travel: number,
+  phase: number,
   pulse: number,
 ): void {
-  const alpha = 0.82 + 0.18 * pulse;
-  void state;
+  const length = (78 + 18 * pulse) * state.unit;
+  const thick = 4.2 * state.unit;
+  const speed = (150 + (direction < 0 ? 24 : 0)) * state.unit;
+  const travel = (time * speed + boost * 28 * state.unit + phase) % (span + length + 120 * state.unit);
+  const nose = direction > 0 ? left + travel : left + span - travel;
+  const tail = direction > 0 ? nose - length : nose;
+  const grad = ctx.createLinearGradient(tail, lane, tail + length, lane);
   if (direction > 0) {
-    const nose = left + travel;
-    const streak = ctx.createLinearGradient(nose - length, lane, nose, lane);
-    streak.addColorStop(0, rgba(0.95, 0.18, 0.12, 0));
-    streak.addColorStop(0.18, rgba(1, 0.28, 0.16, 0.75 * alpha));
-    streak.addColorStop(0.42, rgba(1, 0.9, 0.7, 0.9 * alpha));
-    streak.addColorStop(1, rgba(1, 0.98, 0.92, alpha));
-    ctx.fillStyle = streak;
-    ctx.fillRect(nose - length, lane, length, thick);
+    grad.addColorStop(0, rgba(1, 0.45, 0.22, 0));
+    grad.addColorStop(0.55, rgba(1, 0.72, 0.42, 0.55 + 0.2 * pulse));
+    grad.addColorStop(1, rgba(1, 0.96, 0.88, 0.95));
   } else {
-    const nose = right - travel;
-    const streak = ctx.createLinearGradient(nose, lane, nose + length, lane);
-    streak.addColorStop(0, rgba(1, 0.98, 0.92, alpha));
-    streak.addColorStop(0.58, rgba(1, 0.9, 0.7, 0.9 * alpha));
-    streak.addColorStop(0.82, rgba(1, 0.28, 0.16, 0.75 * alpha));
-    streak.addColorStop(1, rgba(0.95, 0.18, 0.12, 0));
-    ctx.fillStyle = streak;
-    ctx.fillRect(nose, lane, length, thick);
+    grad.addColorStop(0, rgba(0.75, 0.92, 1, 0.95));
+    grad.addColorStop(0.45, rgba(0.45, 0.75, 1, 0.5 + 0.2 * pulse));
+    grad.addColorStop(1, rgba(0.3, 0.55, 1, 0));
   }
+  ctx.fillStyle = grad;
+  ctx.fillRect(tail, lane - thick / 2, length, thick);
+  const headX = direction > 0 ? nose : tail;
+  ctx.fillStyle = rgba(1, 0.98, 0.94, 0.95);
+  ctx.beginPath();
+  ctx.arc(headX, lane, 3.1 * state.unit, 0, Math.PI * 2);
+  ctx.fill();
 }

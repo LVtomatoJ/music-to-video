@@ -85,7 +85,7 @@ export const mapTemplate = defineTemplate<MapState, typeof mapParams>({
     name: "地图",
     author: "music-to-video",
     version: "1.0.0",
-    description: "一颗圆球沿着节拍走出一条疏朗的螺旋。钉和短墙分在路的两侧，不会挤成一团。",
+    description: "球沿着节拍在钉和短墙之间弹开。路上留下一条发光的轨迹，镜头跟着走。",
   },
   tier: "2d",
   params: mapParams,
@@ -125,7 +125,7 @@ function buildMap(width: number, height: number, music: MusicData, skinName: str
     y = Math.sin(theta) * radius;
   });
   const skin = SKINS[skinName] ?? SKINS.neon;
-  const ballR = 26 * scale;
+  const ballR = 22 * scale;
   const camera = bakeCamera(width, height, hits, beats, music.duration, scale, ballR);
   return {
     width,
@@ -136,7 +136,7 @@ function buildMap(width: number, height: number, music: MusicData, skinName: str
     skin,
     light: skinName === "pastel",
     ballR,
-    pegR: 12 * scale,
+    pegR: 16 * scale,
     camX: camera.x,
     camY: camera.y,
     camZ: camera.z,
@@ -167,12 +167,15 @@ function position(hits: Hit[], time: number): { x: number; y: number; heading: n
 
 function cameraTarget(width: number, height: number, hits: Hit[], time: number, scale: number): [number, number, number] {
   const ball = position(hits, time);
-  const ahead = position(hits, time + 0.38);
-  const focusX = ball.x * 0.58 + ahead.x * 0.42;
-  const focusY = ball.y * 0.58 + ahead.y * 0.42;
-  const dist = Math.hypot(ahead.x - ball.x, ahead.y - ball.y);
-  const span = Math.max(dist * 2.15, 150 * scale);
-  const zoom = clamp((Math.min(width, height) * 0.46) / span, 1.2, 1.85);
+  const back = position(hits, time - 1.15);
+  const ahead = position(hits, time + 0.7);
+  const focusX = back.x * 0.2 + ball.x * 0.5 + ahead.x * 0.3;
+  const focusY = back.y * 0.2 + ball.y * 0.5 + ahead.y * 0.3;
+  const span = Math.max(
+    Math.hypot(ahead.x - back.x, ahead.y - back.y),
+    420 * scale,
+  );
+  const zoom = clamp((Math.min(width, height) * 0.72) / span, 0.92, 1.35);
   return [focusX, focusY, zoom];
 }
 
@@ -224,6 +227,20 @@ function paintMap(
   sky.addColorStop(1, rgb(...state.skin.bg1));
   ctx.fillStyle = sky;
   ctx.fillRect(0, 0, state.width, state.height);
+  for (const [ox, oy, tint] of [
+    [0.3, 0.35, state.skin.ball],
+    [0.72, 0.62, state.skin.peg],
+  ] as const) {
+    const x = ox * state.width + Math.sin(time * 0.2 + ox) * 12;
+    const y = oy * state.height;
+    const orb = ctx.createRadialGradient(x, y, 0, x, y, state.width * 0.28);
+    orb.addColorStop(0, rgba(tint[0], tint[1], tint[2], state.light ? 0.16 : 0.1 + 0.05 * pulse));
+    orb.addColorStop(1, rgba(tint[0], tint[1], tint[2], 0));
+    ctx.fillStyle = orb;
+    ctx.beginPath();
+    ctx.arc(x, y, state.width * 0.28, 0, TAU);
+    ctx.fill();
+  }
   ctx.save();
   ctx.translate(state.width / 2, state.height / 2);
   ctx.scale(zoom, zoom);
@@ -231,7 +248,10 @@ function paintMap(
   paintPath(ctx, state, time);
   for (const hit of state.hits) {
     const age = time - hit.time;
-    if (age < -0.55 || age > 1.7) continue;
+    if (age < -0.7 || age > 10) continue;
+    const dx = hit.x - camX;
+    const dy = hit.y - camY;
+    if (dx * dx + dy * dy > (780 * state.scale) ** 2) continue;
     paintObstacle(ctx, state, hit, age, pulse);
   }
   paintTrail(ctx, state, time);
@@ -244,47 +264,59 @@ function paintMap(
 }
 
 function paintPath(ctx: CanvasRenderingContext2D, state: MapState, time: number): void {
-  ctx.lineCap = "round";
-  ctx.lineJoin = "round";
-  ctx.strokeStyle = rgba(state.skin.ink[0], state.skin.ink[1], state.skin.ink[2], state.light ? 0.18 : 0.22);
-  ctx.lineWidth = 2 * state.scale;
   ctx.beginPath();
   let started = false;
   for (const hit of state.hits) {
-    if (hit.time < time - 1.15) continue;
-    if (hit.time > time) break;
+    if (hit.time < time - 2.4) continue;
+    if (hit.time > time + 0.75) break;
     if (!started) {
       ctx.moveTo(hit.x, hit.y);
       started = true;
     } else ctx.lineTo(hit.x, hit.y);
   }
   const live = position(state.hits, time);
-  if (started) ctx.lineTo(live.x, live.y);
+  if (!started) return;
+  ctx.lineTo(live.x, live.y);
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  ctx.strokeStyle = rgba(state.skin.ball[0], state.skin.ball[1], state.skin.ball[2], state.light ? 0.28 : 0.42);
+  ctx.lineWidth = 18 * state.scale;
+  ctx.stroke();
+  ctx.strokeStyle = rgba(1, 1, 1, state.light ? 0.45 : 0.85);
+  ctx.lineWidth = 3.2 * state.scale;
   ctx.stroke();
 }
 
 function paintObstacle(ctx: CanvasRenderingContext2D, state: MapState, hit: Hit, age: number, pulse: number): void {
   const normalX = -Math.sin(hit.heading) * hit.side;
   const normalY = Math.cos(hit.heading) * hit.side;
-  const gap = state.ballR + (hit.kind === "peg" ? state.pegR : 7 * state.scale) + 5 * state.scale;
+  const gap = state.ballR + (hit.kind === "peg" ? state.pegR : 8 * state.scale) + 16 * state.scale;
   const x = hit.x + normalX * gap;
   const y = hit.y + normalY * gap;
-  const born = age < 0 ? smoothstep(1 + age / 0.22) : 1;
-  const fade = age > 1.05 ? smoothstep(1 - (age - 1.05) / 0.65) : 1;
+  const born = age < 0 ? 0.45 * smoothstep(1 + age / 0.35) : 1;
+  const fade = age > 7.5 ? smoothstep(1 - (age - 7.5) / 2.5) : 1;
   const flash = age >= 0 && age < 0.28 ? 1 - age / 0.28 : 0;
   const alpha = born * fade;
   if (alpha <= 0.02) return;
   if (hit.kind === "peg") {
-    ctx.fillStyle = rgba(state.skin.peg[0], state.skin.peg[1], state.skin.peg[2], (state.light ? 0.9 : 0.95) * alpha);
+    const radius = state.pegR * (1 + 0.14 * flash);
+    const halo = ctx.createRadialGradient(x, y, radius * 0.2, x, y, radius * 2.4);
+    halo.addColorStop(0, rgba(state.skin.peg[0], state.skin.peg[1], state.skin.peg[2], 0.55 * alpha));
+    halo.addColorStop(1, rgba(state.skin.peg[0], state.skin.peg[1], state.skin.peg[2], 0));
+    ctx.fillStyle = halo;
     ctx.beginPath();
-    ctx.arc(x, y, state.pegR * (1 + 0.12 * flash), 0, TAU);
+    ctx.arc(x, y, radius * 2.4, 0, TAU);
     ctx.fill();
-    ctx.strokeStyle = rgba(1, 1, 1, (0.35 + 0.4 * flash) * alpha);
-    ctx.lineWidth = 2 * state.scale;
+    ctx.fillStyle = rgba(state.skin.peg[0], state.skin.peg[1], state.skin.peg[2], (state.light ? 0.92 : 1) * alpha);
+    ctx.beginPath();
+    ctx.arc(x, y, radius, 0, TAU);
+    ctx.fill();
+    ctx.strokeStyle = rgba(1, 1, 1, (0.4 + 0.45 * flash) * alpha);
+    ctx.lineWidth = 2.2 * state.scale;
     ctx.stroke();
   } else {
-    const length = 64 * state.scale;
-    const thick = 9 * state.scale;
+    const length = 108 * state.scale;
+    const thick = 14 * state.scale;
     ctx.save();
     ctx.translate(x, y);
     ctx.rotate(hit.heading + Math.PI / 2);
