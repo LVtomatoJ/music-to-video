@@ -14,7 +14,7 @@ import cairo
 import numpy as np
 
 from music2video.analysis import Analysis, section_at
-from music2video.notes import Tone, extract_tones
+from music2video.notes import Tone, chroma_columns, extract_tones
 from music2video.registry import active_palette
 from music2video.scene import xorshift32
 
@@ -832,6 +832,158 @@ class PianoScene:
         self.keyboard_dip = (3.0 + 4.2 * self._energy) * strong
 
 
+def _four_octave_span(center: int) -> tuple[int, int]:
+    """C-to-B, four octaves, with the melody above a free bass octave."""
+    best: tuple[float, int, int] | None = None
+    for lo in range(36, 72, 12):
+        hi = lo + 47
+        if not lo <= center <= hi:
+            continue
+        score = abs((center - lo) / 47.0 - 0.62)
+        if best is None or score < best[0]:
+            best = (score, lo, hi)
+    if best is None:
+        return 48, 95
+    return best[1], best[2]
+
+
+def _keys_for(lo: int, hi: int, pitch_class: int) -> list[int]:
+    first = lo + (pitch_class - lo) % 12
+    return list(range(first, hi + 1, 12))
+
+
+def _slot_free(taken: dict[int, list[tuple[float, float]]], midi: int, time: float, duration: float) -> bool:
+    gap = 0.05
+    start, end = time, time + duration + gap
+    for other, length in taken.get(midi, ()):
+        if start < other + length + gap and other < end:
+            return False
+    return True
+
+
+def _hold(taken: dict[int, list[tuple[float, float]]], midi: int, time: float, duration: float) -> None:
+    taken.setdefault(midi, []).append((time, duration))
+
+
+def _chord_classes(column: list[float], count: int, root_hint: int) -> list[int]:
+    if column and max(column) > 1e-6:
+        order = sorted(range(12), key=lambda pitch: column[pitch], reverse=True)
+    else:
+        order = [root_hint % 12, (root_hint + 4) % 12, (root_hint + 7) % 12, (root_hint + 11) % 12]
+    picked: list[int] = []
+    for pitch in order:
+        if pitch in picked:
+            continue
+        picked.append(pitch)
+        if len(picked) >= count:
+            break
+    extra = 0
+    while len(picked) < count:
+        candidate = (picked[0] + 4 + 3 * extra) % 12
+        extra += 1
+        if candidate not in picked:
+            picked.append(candidate)
+    return picked[:count]
+
+
+def _bass_times(analysis: Analysis) -> list[float]:
+    beats = [float(beat) for beat in analysis.beats]
+    if not beats:
+        return []
+    if analysis.bands and analysis.rms_times:
+        lows = []
+        for beat in beats:
+            index = min(range(len(analysis.rms_times)), key=lambda i: abs(analysis.rms_times[i] - beat))
+            row = analysis.bands[index]
+            lows.append(float(row[0]) if row else 0.0)
+        if lows and max(lows) > 0.05:
+            ordered = sorted(lows)
+            cut = max(0.42, ordered[int(0.62 * (len(ordered) - 1))])
+            found = [beat for beat, level in zip(beats, lows) if level >= cut]
+            if found:
+                return found
+    return [float(beat) for beat in analysis.strong_beats] or beats[::4]
+
+
+def _voice(lo: int, hi: int, pitch_class: int, time: float, duration: float, taken, prefer: str) -> int | None:
+    keys = _keys_for(lo, hi, pitch_class)
+    if not keys:
+        return None
+    if prefer == "bass":
+        ordered = keys[:2]
+    elif prefer == "high":
+        ordered = list(reversed(keys[1:] or keys))
+    else:
+        mid = keys[1:-1] or keys
+        ordered = mid
+    for midi in ordered:
+        if _slot_free(taken, midi, time, duration):
+            return midi
+    for midi in keys:
+        if _slot_free(taken, midi, time, duration):
+            return midi
+    return None
+
+
+def _add_arrangement(notes: list[KeyNote], analysis: Analysis, lo: int, hi: int) -> None:
+    """Chord tones on beats, bass on low hits, and a short rising ripple on strong beats.
+
+    Every added onset lands on its own time. A key is used only when the previous
+    note on it has already finished, so the same key never stacks.
+    """
+    beats = [float(beat) for beat in analysis.beats]
+    if not beats:
+        return
+    taken: dict[int, list[tuple[float, float]]] = {}
+    for note in notes:
+        _hold(taken, note.display, note.time, note.duration)
+    columns = chroma_columns(analysis, beats)
+    strong = {round(float(hit), 5) for hit in analysis.strong_beats}
+    bass_hits = {round(hit, 5) for hit in _bass_times(analysis)}
+    melody_at = {}
+    for note in notes:
+        if note.source == "pitch":
+            melody_at.setdefault(round(note.time, 3), note.midi)
+    for index, beat in enumerate(beats):
+        if beat > analysis.duration + 1e-3:
+            continue
+        energy = section_at(analysis.sections, beat).energy
+        count = 3 if energy < 0.62 else 4
+        column = columns[index] if index < len(columns) else [0.0] * 12
+        root_hint = melody_at.get(round(beat, 3), notes[0].midi if notes else 60)
+        classes = _chord_classes(column, count, root_hint)
+        duration = max(0.12, min(0.34, 0.12 + 0.2 * energy))
+        for chord_index, pitch_class in enumerate(classes):
+            prefer = "mid"
+            if chord_index == count - 1 and energy >= 0.62:
+                prefer = "high"
+            midi = _voice(lo, hi, pitch_class, beat, duration, taken, prefer)
+            if midi is None:
+                continue
+            _hold(taken, midi, beat, duration)
+            notes.append(KeyNote(beat, duration, midi, midi, "chroma", duration))
+        if round(beat, 5) in bass_hits and classes:
+            bass_duration = max(0.16, min(0.42, 0.18 + 0.2 * energy))
+            midi = _voice(lo, hi, classes[0], beat, bass_duration, taken, "bass")
+            if midi is not None:
+                _hold(taken, midi, beat, bass_duration)
+                notes.append(KeyNote(beat, bass_duration, midi, midi, "bass", bass_duration))
+        if round(beat, 5) in strong:
+            steps = 2 if energy < 0.45 else 3 if energy < 0.72 else 4
+            for step in range(steps):
+                when = beat + 0.085 * (step + 1)
+                if when > analysis.duration:
+                    break
+                pitch_class = classes[step % len(classes)]
+                ripple = max(0.12, min(0.22, 0.1 + 0.08 * energy))
+                midi = _voice(lo, hi, pitch_class, when, ripple, taken, "high")
+                if midi is None:
+                    continue
+                _hold(taken, midi, when, ripple)
+                notes.append(KeyNote(when, ripple, midi, midi, "arp", ripple))
+    notes.sort(key=lambda note: (note.time, note.display))
+
+
 def _build_piano(width: int, height: int, analysis: Analysis, seed: int) -> PianoScene:
     del seed
     tones = extract_tones(analysis)
@@ -839,16 +991,7 @@ def _build_piano(width: int, height: int, analysis: Analysis, seed: int) -> Pian
         tones = [Tone(0.0, 0.4, 60, "chroma")]
     midis = [tone.midi for tone in tones]
     center = sorted(midis)[len(midis) // 2]
-    lo = max(36, min(midis) - 3)
-    hi = min(96, max(midis) + 3)
-    lo -= lo % 12
-    hi += (11 - (hi % 12)) % 12
-    if hi - lo > 36:
-        lo = center - 17
-        hi = center + 18
-        lo -= lo % 12
-        if hi % 12 != 11:
-            hi += (11 - hi % 12) % 12
+    lo, hi = _four_octave_span(center)
     notes = []
     for tone in tones:
         if not 0.0 <= tone.time <= analysis.duration + 1e-3:
@@ -859,12 +1002,14 @@ def _build_piano(width: int, height: int, analysis: Analysis, seed: int) -> Pian
         while shown > hi:
             shown -= 12
         notes.append(KeyNote(tone.time, tone.duration, tone.midi, shown, tone.source, tone.duration))
+    _add_arrangement(notes, analysis, lo, hi)
     _open_same_key_gaps(notes)
     white_count = sum(1 for tone in range(lo, hi + 1) if tone % 12 in WHITES)
     white_count = max(1, white_count)
-    # Cap the width so a narrow melody does not become a row of slabs.
-    key_w = min(68.0, (width * 0.9) / white_count)
-    key_left = (width - key_w * white_count) / 2.0
+    board = float(width) * 0.875
+    key_w = board / white_count
+    key_left = (float(width) - board) / 2.0
+    white_h = min(float(height) * 0.24, key_w * 4.35)
     scene = PianoScene(
         form="piano",
         palette_name="waterfall",
@@ -876,9 +1021,9 @@ def _build_piano(width: int, height: int, analysis: Analysis, seed: int) -> Pian
         hi=hi,
         key_w=key_w,
         key_left=key_left,
-        key_top=height * 0.655,
-        white_h=min(height * 0.30, key_w * 5.05),
-        lead=1.45,
+        key_top=float(height) - white_h - float(height) * 0.11,
+        white_h=white_h,
+        lead=1.68,
         timing={},
         sync_report={},
         analysis=analysis,
@@ -888,15 +1033,18 @@ def _build_piano(width: int, height: int, analysis: Analysis, seed: int) -> Pian
         x, y = scene.note_head(note, note.time)
         kx, ky = scene.key_center(note.display)
         worst = max(worst, math.hypot(x - kx, y - ky))
+    melody = [note for note in notes if note.source == "pitch"]
     beat_gap = _median_gap([])
-    if notes and analysis.beats:
-        gaps = sorted(_nearest(list(analysis.beats), note.time) for note in notes)
+    if melody and analysis.beats:
+        gaps = sorted(_nearest(list(analysis.beats), note.time) for note in melody)
         beat_gap = gaps[len(gaps) // 2]
     scene.timing = {"max_timing_error_s": 0.0, "max_position_error_px": worst, "hits": len(notes)}
     scene.sync_report = {
         "notes": len(notes),
-        "pitched": sum(1 for note in notes if note.source == "pitch"),
+        "pitched": len(melody),
         "chroma": sum(1 for note in notes if note.source == "chroma"),
+        "bass": sum(1 for note in notes if note.source == "bass"),
+        "arp": sum(1 for note in notes if note.source == "arp"),
         "median_beat_gap_ms": round(beat_gap * 1000.0, 1),
     }
     scene._energy = section_at(analysis.sections, 0.0).energy
@@ -946,28 +1094,87 @@ def _paint_piano(ctx, scene: PianoScene) -> None:
     ctx.translate(scene.cam_x, scene.keyboard_dip)
     ctx.scale(scene.cam_zoom, scene.cam_zoom)
     ctx.translate(-width / 2.0, -scene.key_top)
-    wash = 0.045 + 0.07 * scene._energy + 0.055 * scene.beat_level
-    glow = cairo.RadialGradient(width * 0.5, scene.key_top, 30, width * 0.5, scene.key_top * 0.55, width * 0.62)
-    glow.add_color_stop_rgba(0.0, pal.accent[0], pal.accent[1], pal.accent[2], wash)
-    glow.add_color_stop_rgba(1.0, pal.accent[0], pal.accent[1], pal.accent[2], 0.0)
-    ctx.set_source(glow)
-    ctx.rectangle(0, 0, width, scene.key_top + 8)
-    ctx.fill()
-    ctx.set_line_width(1)
-    lane = 0.028 + 0.02 * scene.beat_level
-    for tone in range(scene.lo, scene.hi + 1):
-        if tone % 12 not in WHITES:
-            continue
-        x = scene.key_left + scene._whites_before(tone) * scene.key_w + scene.key_w * 0.5
-        ctx.set_source_rgba(*pal.accent2, lane)
-        ctx.move_to(x, 0)
-        ctx.line_to(x, scene.key_top)
-        ctx.stroke()
+    _paint_piano_air(ctx, scene, pal)
+    _paint_key_beams(ctx, scene)
     _paint_falling_notes(ctx, scene)
-    _paint_key_columns(ctx, scene)
     _paint_keyboard(ctx, scene, pal)
+    _paint_key_floor(ctx, scene)
     _paint_key_sparks(ctx, scene)
     ctx.restore()
+
+
+def _live_colors(scene: PianoScene) -> list[tuple[float, float, float]]:
+    colors: list[tuple[float, float, float]] = []
+    for note in scene.notes:
+        remain = note.time - scene.time
+        age = scene.time - note.time
+        if -0.05 <= remain <= scene.lead or 0.0 <= age <= note.duration + 0.2:
+            colors.append(NOTE_COLORS[note.midi % 12])
+            if len(colors) >= 8:
+                break
+    return colors
+
+
+def _paint_piano_air(ctx, scene: PianoScene, pal) -> None:
+    """Soft color in the space above the keys. The wash follows whatever is in the air."""
+    colors = _live_colors(scene) or [pal.accent2]
+    red = sum(color[0] for color in colors) / len(colors)
+    green = sum(color[1] for color in colors) / len(colors)
+    blue = sum(color[2] for color in colors) / len(colors)
+    energy = scene._energy
+    beat = scene.beat_level
+    wash = 0.11 + 0.16 * energy + 0.09 * beat
+    glow = cairo.RadialGradient(scene.width * 0.5, scene.key_top * 0.72, 40, scene.width * 0.5, scene.key_top * 0.35, scene.width * 0.72)
+    glow.add_color_stop_rgba(0.0, red, green, blue, wash)
+    glow.add_color_stop_rgba(0.55, red * 0.7, green * 0.75, blue, wash * 0.45)
+    glow.add_color_stop_rgba(1.0, red, green, blue, 0.0)
+    ctx.set_source(glow)
+    ctx.rectangle(0, 0, scene.width, scene.key_top + 4)
+    ctx.fill()
+    span = max(1.0, scene.key_w * sum(1 for tone in range(scene.lo, scene.hi + 1) if tone % 12 in WHITES))
+    count = 28 + int(22 * energy)
+    for index in range(count):
+        phase = index * 2.399
+        drift = (index * 83.0 + scene.time * (14.0 + (index % 5) * 3.0)) % span
+        x = scene.key_left + drift
+        travel = scene.key_top * 0.9
+        y = travel - ((scene.time * (18.0 + (index % 6) * 4.0) + index * 37.0) % travel)
+        twinkle = 0.45 + 0.55 * (0.5 + 0.5 * math.sin(scene.time * 1.6 + phase))
+        alpha = (0.06 + 0.1 * energy + 0.05 * beat) * twinkle
+        if alpha < 0.03:
+            continue
+        tone = colors[index % len(colors)]
+        ctx.set_source_rgba(tone[0], tone[1], tone[2], alpha)
+        ctx.arc(x, y, 1.15 + (index % 3) * 0.35, 0, math.tau)
+        ctx.fill()
+
+
+def _paint_key_beams(ctx, scene: PianoScene) -> None:
+    """Colored light rising out of a key that is about to be played or has just been played."""
+    best: dict[int, tuple[float, tuple[float, float, float]]] = {}
+    for note in scene.notes:
+        level = _hit_level(note, scene.time)
+        remain = note.time - scene.time
+        if 0.0 < remain < scene.lead:
+            level = max(level, 0.28 * (1.0 - remain / scene.lead))
+        if level <= 0.04:
+            continue
+        shown = scene._clamp_midi(note.display)
+        color = NOTE_COLORS[note.midi % 12]
+        previous = best.get(shown)
+        if previous is None or level > previous[0]:
+            best[shown] = (level, color)
+    for midi, (level, color) in best.items():
+        x, key_y = scene.key_center(midi)
+        black = midi % 12 not in WHITES
+        beam_w = scene.key_w * (0.34 if black else 0.5)
+        beam = cairo.LinearGradient(0, 24, 0, key_y)
+        beam.add_color_stop_rgba(0.0, color[0], color[1], color[2], 0.0)
+        beam.add_color_stop_rgba(0.55, color[0], color[1], color[2], 0.1 * level)
+        beam.add_color_stop_rgba(1.0, color[0], color[1], color[2], 0.38 * level)
+        ctx.set_source(beam)
+        ctx.rectangle(x - beam_w / 2.0, 24, beam_w, key_y - 24)
+        ctx.fill()
 
 
 def _paint_falling_notes(ctx, scene: PianoScene) -> None:
@@ -1070,28 +1277,49 @@ def _hit_level(note: KeyNote, time: float) -> float:
     return _smooth(1.0 - (age - note.duration) / 0.28)
 
 
-def _paint_key_columns(ctx, scene: PianoScene) -> None:
-    for note in scene.notes:
-        level = _hit_level(note, scene.time)
-        if level <= 0.0:
+def _paint_key_floor(ctx, scene: PianoScene) -> None:
+    """A dark lip and a fading reflection so the keyboard sits on a surface."""
+    pressed = _press_level(scene)
+    top = scene.key_top + scene.white_h
+    whites = [tone for tone in range(scene.lo, scene.hi + 1) if tone % 12 in WHITES]
+    if not whites:
+        return
+    board = scene.key_w * len(whites)
+    reflect_h = min(scene.height - top - 6.0, scene.white_h * 0.62)
+    if reflect_h < 8.0:
+        return
+    ctx.set_source_rgba(0.0, 0.0, 0.0, 0.45)
+    ctx.rectangle(scene.key_left - 6, top, board + 12, 7)
+    ctx.fill()
+    for tone in whites:
+        x = scene.key_left + scene._whites_before(tone) * scene.key_w
+        level = pressed.get(tone, 0.0)
+        color = NOTE_COLORS[tone % 12] if level > 0.0 else (0.75, 0.77, 0.82)
+        alpha = 0.16 + 0.28 * level
+        grad = cairo.LinearGradient(0, top, 0, top + reflect_h)
+        grad.add_color_stop_rgba(0.0, color[0], color[1], color[2], alpha)
+        grad.add_color_stop_rgba(1.0, color[0], color[1], color[2], 0.0)
+        ctx.set_source(grad)
+        ctx.rectangle(x + 1.4, top + 6, scene.key_w - 2.8, reflect_h - 6)
+        ctx.fill()
+    black_w = scene.key_w * 0.58
+    black_reflect = reflect_h * 0.55
+    for tone in range(scene.lo, scene.hi + 1):
+        if tone % 12 in WHITES:
             continue
-        color = NOTE_COLORS[note.midi % 12]
-        x, key_y = scene.key_center(note.display)
-        shown = scene._clamp_midi(note.display)
-        black = shown % 12 not in WHITES
-        column_w = scene.key_w * (0.5 if black else 0.7)
-        column_h = 80.0 + 180.0 * level
-        column = cairo.LinearGradient(0, key_y - column_h, 0, key_y)
-        column.add_color_stop_rgba(0, *color, 0.0)
-        column.add_color_stop_rgba(0.45, *color, 0.22 * level)
-        column.add_color_stop_rgba(1, *color, 0.85 * level)
-        ctx.set_source(column)
-        ctx.rectangle(x - column_w / 2.0, key_y - column_h, column_w, column_h)
+        x = scene.key_left + scene._whites_before(tone) * scene.key_w - black_w / 2.0
+        level = pressed.get(tone, 0.0)
+        color = NOTE_COLORS[tone % 12] if level > 0.0 else (0.05, 0.05, 0.07)
+        grad = cairo.LinearGradient(0, top, 0, top + black_reflect)
+        grad.add_color_stop_rgba(0.0, color[0], color[1], color[2], 0.28 + 0.35 * level)
+        grad.add_color_stop_rgba(1.0, color[0], color[1], color[2], 0.0)
+        ctx.set_source(grad)
+        ctx.rectangle(x, top + 6, black_w, black_reflect)
         ctx.fill()
 
 
 def _paint_key_sparks(ctx, scene: PianoScene) -> None:
-    """Impact after the keys: a flash on the key, one shockwave, and a few streaks."""
+    """Impact after the keys: a flash on the key, one shockwave, and streaks on the lead notes."""
     for note in scene.notes:
         age = scene.time - note.time
         if age < 0.0 or age > 0.46:
@@ -1110,8 +1338,10 @@ def _paint_key_sparks(ctx, scene: PianoScene) -> None:
         ring = _smooth(min(1.0, age / 0.32))
         ctx.set_source_rgba(*color, fade * 0.9)
         ctx.set_line_width(3.2 * fade + 1.4)
-        ctx.arc(x, key_y + 2.0, 22.0 + ring * 78.0, math.pi * 1.08, math.pi * 1.92)
+        ctx.arc(x, key_y + 2.0, 22.0 + ring * 70.0, math.pi * 1.08, math.pi * 1.92)
         ctx.stroke()
+        if note.source == "chroma":
+            continue
         for spark in range(8):
             angle = math.pi * 1.05 + spark * (math.pi * 0.9 / 7.0)
             dist = 46.0 + age * (280.0 + spark * 16.0)
@@ -1162,6 +1392,9 @@ def _paint_keyboard(ctx, scene: PianoScene, pal) -> None:
             ctx.set_source_rgba(1, 0.98, 0.94, 0.55 + 0.4 * level)
             ctx.rectangle(x + gap, scene.key_top + sink, scene.key_w - gap * 2, 3.5)
             ctx.fill()
+        ctx.set_source_rgba(1, 1, 1, 0.16 if level <= 0 else 0.34)
+        ctx.rectangle(x + gap + 1.2, scene.key_top + sink + 3.0, 1.5, max(4.0, scene.white_h - sink - 14.0))
+        ctx.fill()
         ctx.set_source_rgba(0, 0, 0, 0.16)
         ctx.rectangle(x + scene.key_w - gap - 3.0, scene.key_top + sink, 2.4, scene.white_h - sink)
         ctx.fill()

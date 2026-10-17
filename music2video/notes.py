@@ -115,6 +115,36 @@ def _from_beats(analysis: Analysis, chroma, chroma_times, onsets: list[float] | 
     return _dedupe(notes)
 
 
+def chroma_columns(analysis: Analysis, times: list[float]) -> list[list[float]]:
+    """Twelve pitch-class weights at each time. Used to voice chords, not the melody."""
+    key = ("chroma-cols-v1", str(analysis.wav_path), round(analysis.duration, 3), len(times), round(times[0], 3) if times else 0)
+    cached = _CACHE.get(key)
+    if cached is not None:
+        return [list(column) for column in cached]
+    columns = _chroma_columns(analysis, times)
+    _CACHE[key] = tuple(tuple(column) for column in columns)
+    return columns
+
+
+def _chroma_columns(analysis: Analysis, times: list[float]) -> list[list[float]]:
+    if not times:
+        return []
+    if not analysis.wav_path.is_file():
+        return [[0.0] * 12 for _ in times]
+    y, sr = librosa.load(str(analysis.wav_path), sr=analysis.sample_rate, mono=True)
+    if len(y) < 2048:
+        return [[0.0] * 12 for _ in times]
+    chroma = librosa.feature.chroma_cqt(y=y, sr=sr, hop_length=HOP)
+    chroma_times = np.asarray(librosa.times_like(chroma, sr=sr, hop_length=HOP))
+    if chroma.shape[1] == 0:
+        return [[0.0] * 12 for _ in times]
+    columns = []
+    for when in times:
+        index = int(np.argmin(np.abs(chroma_times - when)))
+        columns.append([float(value) for value in chroma[:, index]])
+    return columns
+
+
 def _chroma_at(chroma, times, when: float) -> int:
     if chroma is None or len(getattr(chroma, "shape", ())) != 2 or chroma.shape[1] == 0:
         return 0

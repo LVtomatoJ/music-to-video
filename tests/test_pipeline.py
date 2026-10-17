@@ -285,6 +285,13 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(overlaps, 0)
         self.assertGreater(checked, 0)
         self.assertGreaterEqual(worst_gap, 3.0)
+        whites = sum(1 for tone in range(piano.lo, piano.hi + 1) if tone % 12 in {0, 2, 4, 5, 7, 9, 11})
+        board = piano.key_w * whites
+        self.assertGreaterEqual(board / piano.width, 0.84)
+        self.assertLessEqual(board / piano.width, 0.91)
+        self.assertGreaterEqual(whites, 21)
+        self.assertGreater(piano.sync_report["chroma"], 0)
+        self.assertGreaterEqual(_visible_note_average(piano), 3.0)
         self.assertEqual(piano.timing["max_timing_error_s"], 0.0)
         self.assertLess(piano.timing["max_position_error_px"], 1e-4)
 
@@ -354,6 +361,26 @@ def _assert_box_margin(city, building, risen: float) -> None:
             f"building x={building.x:.1f} vertical margin {top:.1f}..{bottom:.1f} "
             f"on {city.height:.0f} at t={city.time:.3f}"
         )
+
+
+def _visible_note_average(scene, step: float = 0.25) -> float:
+    total = 0
+    frames = 0
+    time = 0.4
+    end = max(0.4, scene.duration - 0.4)
+    while time <= end + 1e-6:
+        scene.time = time
+        visible = 0
+        for note in scene.notes:
+            if note.span <= 0.02:
+                continue
+            top, bottom = scene.note_bounds(note)
+            if bottom - top >= 1.2 and bottom >= -24 and top <= scene.key_top + 6:
+                visible += 1
+        total += visible
+        frames += 1
+        time += step
+    return total / max(frames, 1)
 
 
 def _same_key_gaps(scene, step: float = 1.0 / 30.0) -> tuple[int, float, int]:
