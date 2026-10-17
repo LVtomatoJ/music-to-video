@@ -1,6 +1,6 @@
 import type { MusicData } from "../music";
 import { sectionAt } from "../music";
-import { clamp, roundRect, sampleCurve, smoothstep } from "../math";
+import { clamp, roundRect, sampleCurve } from "../math";
 import { defineTemplate, type ParamSpec } from "../template";
 import { BAKE_DT, TAU, as2d, frameCount, rgb, rgba } from "./shared";
 import { pointOn, solveMap, type Obstacle, type Segment } from "./map-solve";
@@ -176,7 +176,7 @@ export function auditMap(state: MapState): {
   };
 }
 
-/** Recent bounces kept on screen together: the trail, the walls, and the camera share this window. */
+/** Recent bounces the fading trail still draws. Walls stay on the map for the whole song. */
 const HISTORY = 12;
 
 function recentRange(obstacles: Obstacle[], time: number): { from: number; to: number } {
@@ -260,6 +260,9 @@ function cameraTarget(
   }
   consider(ball[0], ball[1], ballR);
   for (let index = from; index < to; index++) consider(obstacles[index].x, obstacles[index].y, ballR);
+  for (let index = to; index < Math.min(obstacles.length, to + 2); index++) {
+    consider(obstacles[index].x, obstacles[index].y, ballR);
+  }
   const boxX = (minX + maxX) / 2;
   const boxY = (minY + maxY) / 2;
   const lookX = boxX * 0.6 + ball[0] * 0.4;
@@ -325,7 +328,7 @@ function bakeCamera(
   return { x, y, z };
 }
 
-/** Keeps the ball inside 15–85% and, while that still has room, slides the last eight walls back onto the frame. */
+/** Keeps the ball inside 15–85% and uses any spare room to bring the recent walls and the next two back onto the frame. */
 export function framedView(state: MapState, time: number): {
   camX: number;
   camY: number;
@@ -365,7 +368,9 @@ export function framedView(state: MapState, time: number): {
     camY += (ballY - maxY) / zoom;
     ballY = maxY;
   }
-  const seen = state.obstacles.filter((obstacle) => obstacle.hitTime <= time + 1e-3).slice(-8);
+  const happened = state.obstacles.filter((obstacle) => obstacle.hitTime <= time + 1e-3);
+  const upcoming = state.obstacles.filter((obstacle) => obstacle.hitTime > time + 1e-3).slice(0, 2);
+  const seen = happened.slice(-8).concat(upcoming);
   const project = (obstacle: Obstacle): [number, number] => [
     (obstacle.x - camX) * zoom + state.width / 2,
     (obstacle.y - camY) * zoom + state.height / 2,
@@ -460,7 +465,7 @@ function paintMap(
   ];
   const trailStart = historyStart(state.segments, state.obstacles, time);
   paintCourse(ctx, state, time, trailStart, project, zoom);
-  for (const obstacle of state.obstacles) paintObstacle(ctx, state, obstacle, time, trailStart, project, zoom);
+  for (const obstacle of state.obstacles) paintObstacle(ctx, state, obstacle, time, project, zoom);
   paintRings(ctx, state, time, project, zoom);
   const radius = state.ballR * zoom * (1 + 0.4 * pulse);
   paintBall(ctx, state, framed.ballX, framed.ballY, radius, pulse);
@@ -543,11 +548,12 @@ function paintRibbon(
   }
 }
 
-function wallFade(time: number, hitTime: number, start: number): number {
+/** Walls are part of the map from the first frame. Ahead of the ball they sit a little dimmer; a hit flashes, then keeps a struck tint. */
+function wallPresence(time: number, hitTime: number): { alpha: number; flash: number; ahead: boolean } {
   const age = time - hitTime;
-  if (hitTime < start - 1e-3 || age < -0.02) return 0;
-  const born = age < 0.12 ? smoothstep(clamp((age + 0.02) / 0.14, 0, 1)) : 1;
-  return born * ageFade(time, hitTime, start);
+  if (age < 0) return { alpha: 0.78, flash: 0, ahead: true };
+  const flash = age < 0.12 ? 1 - age / 0.12 : 0;
+  return { alpha: 1, flash, ahead: false };
 }
 
 function paintObstacle(
@@ -555,15 +561,25 @@ function paintObstacle(
   state: MapState,
   obstacle: Obstacle,
   time: number,
-  trailStart: number,
   project: (x: number, y: number) => [number, number],
   zoom: number,
 ): void {
+  const [sx, sy] = project(obstacle.x, obstacle.y);
+  const reach = 220 * zoom + 48;
+  if (sx < -reach || sy < -reach || sx > state.width + reach || sy > state.height + reach) return;
+  const presence = wallPresence(time, obstacle.hitTime);
+  const base = kindColor(state, obstacle.kind);
+  const struck: [number, number, number] = presence.ahead
+    ? base
+    : [
+        base[0] * 0.7 + state.skin.ball[0] * 0.3,
+        base[1] * 0.7 + state.skin.ball[1] * 0.3,
+        base[2] * 0.7 + state.skin.ball[2] * 0.3,
+      ];
+  const color = mixWhite(struck, 0.85 * presence.flash);
+  const flash = presence.flash;
+  const alpha = presence.alpha;
   const age = time - obstacle.hitTime;
-  const alpha = wallFade(time, obstacle.hitTime, trailStart);
-  if (alpha <= 0.02) return;
-  const flash = age >= 0 && age < 0.12 ? 1 - age / 0.12 : 0;
-  const color = mixWhite(kindColor(state, obstacle.kind), 0.85 * flash);
   if (obstacle.kind === "peg") {
     paintPeg(ctx, state, obstacle, color, alpha, flash, project, zoom);
     return;
