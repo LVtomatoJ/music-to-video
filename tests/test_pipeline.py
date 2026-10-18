@@ -295,21 +295,29 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(piano.timing["max_timing_error_s"], 0.0)
         self.assertLess(piano.timing["max_position_error_px"], 1e-4)
 
+        for aspect_width, aspect_height in ((1920, 1080), (1080, 1920)):
+            stars = build_scene("stars", aspect_width, aspect_height, analysis, 42, "neon")
+            self.assertGreaterEqual(len(stars.stars), 8)
+            self.assertGreater(len(stars.links), 0)
+            for star in stars.stars:
+                self.assertAlmostEqual(stars.brightness(star, star.time), 1.0, places=4)
+                self.assertEqual(stars.brightness(star, star.time - 1.0), 0.0)
+                self.assertGreaterEqual(star.x, 100.0)
+                self.assertGreaterEqual(star.y, 100.0)
+                self.assertLessEqual(star.x, stars.width - 100.0)
+                self.assertLessEqual(star.y, stars.height - 100.0)
+            for left_index, left in enumerate(stars.stars):
+                for right in stars.stars[left_index + 1 :]:
+                    self.assertGreaterEqual(math.hypot(left.x - right.x, left.y - right.y), 60.0)
+            for index, (a, b) in enumerate(stars.links):
+                for c, d in stars.links[index + 1 :]:
+                    if len({a, b, c, d}) < 4:
+                        continue
+                    self.assertFalse(_segments_cross(stars.stars[a], stars.stars[b], stars.stars[c], stars.stars[d]))
+            self.assertGreaterEqual(_constellation_gap(stars), 24.0)
+            self.assertTrue(_stars_answer_a_beat(stars))
+            self.assertEqual(stars.timing["max_timing_error_s"], 0.0)
         stars = build_scene("stars", 1920, 1080, analysis, 42, "neon")
-        self.assertGreaterEqual(len(stars.stars), 8)
-        self.assertGreater(len(stars.links), 0)
-        for star in stars.stars:
-            self.assertAlmostEqual(stars.brightness(star, star.time), 1.0, places=4)
-            self.assertEqual(stars.brightness(star, star.time - 1.0), 0.0)
-        for left_index, left in enumerate(stars.stars):
-            for right in stars.stars[left_index + 1 :]:
-                self.assertGreaterEqual(math.hypot(left.x - right.x, left.y - right.y), 60.0)
-        for index, (a, b) in enumerate(stars.links):
-            for c, d in stars.links[index + 1 :]:
-                if len({a, b, c, d}) < 4:
-                    continue
-                self.assertFalse(_segments_cross(stars.stars[a], stars.stars[b], stars.stars[c], stars.stars[d]))
-        self.assertEqual(stars.timing["max_timing_error_s"], 0.0)
 
         renderer = CairoRenderer(640, 360, fps=30)
         for scene in (city, piano, stars):
@@ -444,6 +452,46 @@ def _same_key_gaps(scene, step: float = 1.0 / 30.0) -> tuple[int, float, int]:
     if worst > 1e8:
         worst = 0.0
     return overlaps, worst, checked
+
+
+def _constellation_gap(scene) -> float:
+    """Smallest gap between the bounding circles of two constellations. Empty sky returns a large gap."""
+    groups: dict[int, list] = {}
+    for star in scene.stars:
+        groups.setdefault(star.phrase, []).append(star)
+    circles = []
+    for group in groups.values():
+        cx = sum(star.x for star in group) / len(group)
+        cy = sum(star.y for star in group) / len(group)
+        radius = max(math.hypot(star.x - cx, star.y - cy) for star in group)
+        circles.append((cx, cy, radius))
+    if len(circles) < 2:
+        return 1e6
+    gap = 1e6
+    for index, (ax, ay, ar) in enumerate(circles):
+        for bx, by, br in circles[index + 1 :]:
+            gap = min(gap, math.hypot(ax - bx, ay - by) - ar - br)
+    return gap
+
+
+def _stars_answer_a_beat(scene) -> bool:
+    """A star in the live phrase is brighter on a beat than halfway to the next one."""
+    beats = [float(beat) for beat in scene.analysis.beats]
+    for star in scene.stars:
+        later = [beat for beat in beats if beat > star.time + 0.45]
+        if len(later) < 2:
+            continue
+        for hit, nxt in zip(later, later[1:]):
+            if nxt - hit < 0.28 or nxt - hit > 1.4:
+                continue
+            if scene.active_phrase(hit + 0.04) != star.phrase:
+                continue
+            if scene.life(star.phrase, hit + 0.04) < 0.9:
+                continue
+            mid = hit + (nxt - hit) * 0.55
+            if scene.brightness(star, hit + 0.04) > scene.brightness(star, mid) + 0.08:
+                return True
+    return False
 
 
 def _segments_cross(a, b, c, d) -> bool:

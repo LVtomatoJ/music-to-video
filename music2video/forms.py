@@ -49,6 +49,23 @@ def _pulse(age: float, attack: float, release: float) -> float:
     return _smooth(1.0 - (age - attack) / max(release, 1e-4))
 
 
+def _hit_flash(times, now: float, rise: float, release: float) -> float:
+    """One at the hit, already rising just before it, then easing out."""
+    level = 0.0
+    lead = max(rise, 1e-4)
+    for hit in times:
+        if hit > now + lead:
+            break
+        age = now - hit
+        if age < -lead or age >= release:
+            continue
+        if age <= 0.0:
+            level = max(level, _smooth((age + lead) / lead))
+        else:
+            level = max(level, _smooth(1.0 - age / release))
+    return level
+
+
 def _times_pulse(times, now: float, attack: float, release: float) -> float:
     level = 0.0
     span = attack + release
@@ -425,16 +442,27 @@ def _paint_city(ctx, scene: CityScene) -> None:
     gradient.add_color_stop_rgb(1, 0.03, 0.02, 0.04)
     ctx.set_source(gradient)
     ctx.paint()
-    for sx, sy, radius, warmth in scene.sky_stars:
+    pulse = scene.beat_pulse()
+    for index, (sx, sy, radius, warmth) in enumerate(scene.sky_stars):
         tone = 0.75 + 0.2 * warmth
-        ctx.set_source_rgba(tone, tone * (0.92 + 0.05 * (1.0 - warmth)), 0.85 + 0.1 * (1.0 - warmth), 0.35 + 0.4 * radius / 2.0)
-        ctx.arc(sx, sy, radius, 0, math.tau)
+        twinkle = 0.62 + 0.38 * math.sin(scene.time * (0.9 + radius) + sx * 0.013 + index)
+        flare = 1.0 + 0.55 * pulse * (0.35 + 0.65 * warmth)
+        alpha = (0.28 + 0.42 * radius / 2.0) * twinkle * flare
+        ctx.set_source_rgba(tone, tone * (0.92 + 0.05 * (1.0 - warmth)), 0.85 + 0.1 * (1.0 - warmth), min(0.95, alpha))
+        ctx.arc(sx, sy, radius * (1.0 + 0.18 * pulse), 0, math.tau)
         ctx.fill()
+    moon_x, moon_y = width * 0.78, height * 0.16
+    halo = cairo.RadialGradient(moon_x, moon_y, 20, moon_x, moon_y, 58 + 16 * pulse)
+    halo.add_color_stop_rgba(0, 0.95, 0.94, 0.88, 0.16 + 0.2 * pulse)
+    halo.add_color_stop_rgba(1, 0.85, 0.86, 0.95, 0.0)
+    ctx.set_source(halo)
+    ctx.arc(moon_x, moon_y, 58 + 16 * pulse, 0, math.tau)
+    ctx.fill()
     ctx.set_source_rgba(0.96, 0.95, 0.9, 0.92)
-    ctx.arc(width * 0.78, height * 0.16, 26, 0, math.tau)
+    ctx.arc(moon_x, moon_y, 26, 0, math.tau)
     ctx.fill()
     ctx.set_source_rgba(0.03, 0.025, 0.07, 1)
-    ctx.arc(width * 0.78 + 11, height * 0.16 - 6, 22, 0, math.tau)
+    ctx.arc(moon_x + 11, moon_y - 6, 22, 0, math.tau)
     ctx.fill()
     ground = height * 0.78
     _paint_layer(ctx, scene, scene.far, ground - 36.0, 0.32, 0.45, (0.035, 0.04, 0.07))
@@ -1436,6 +1464,7 @@ class Star:
     phrase: int
     scale: float = 1.0
     warmth: float = 0.5
+    kind: str = "pitch"
 
 
 @dataclass
@@ -1451,6 +1480,8 @@ class StarScene:
     timing: dict
     sync_report: dict
     analysis: Analysis
+    phrase_span: dict | None = None
+    phrase_centroid: dict | None = None
     caption_title: str = ""
     caption_artist: str = ""
     time: float = 0.0
@@ -1464,18 +1495,120 @@ class StarScene:
     def brightness(self, star: Star, time: float | None = None) -> float:
         when = self.time if time is None else time
         age = when - star.time
-        if age < -0.24:
+        if age < -0.22:
             return 0.0
         if age <= 0.0:
-            return _smooth((age + 0.24) / 0.24)
-        twinkle = 0.84 + 0.16 * math.sin(when * 1.5 + star.phase)
-        return twinkle
+            return _smooth((age + 0.22) / 0.22)
+        life = self.life(star.phrase, when)
+        if life <= 0.0:
+            return 0.0
+        flash = math.exp(-age * 3.4)
+        rest = 0.46 + 0.08 * math.sin(when * (1.5 + 1.8 * self.energy(when)) + star.phase)
+        level = rest + (1.0 - rest) * flash + self.beat_lift(star, when)
+        return max(0.0, min(1.0, level * life))
+
+    def energy(self, time: float | None = None) -> float:
+        when = self.time if time is None else time
+        return section_at(self.analysis.sections, when).energy
+
+    def bands(self, time: float | None = None) -> tuple[float, float]:
+        """Low and high band energy in 0..1. Both are 0 when the analysis has no bands."""
+        when = self.time if time is None else time
+        times = self.analysis.rms_times
+        rows = self.analysis.bands
+        if not times or not rows:
+            return 0.0, 0.0
+        index = min(range(len(times)), key=lambda i: abs(times[i] - when))
+        row = rows[index]
+        if not row:
+            return 0.0, 0.0
+        low = float(sum(row[:2]) / max(1, min(2, len(row))))
+        high = float(sum(row[-3:]) / max(1, min(3, len(row))))
+        return low, high
+
+    def beat_level(self, time: float | None = None) -> float:
+        when = self.time if time is None else time
+        # Peak on the beat itself. The frame that contains the hit is the bright one.
+        return _hit_flash(self.analysis.beats, when, 0.04, 0.22)
+
+    def strong_level(self, time: float | None = None) -> float:
+        when = self.time if time is None else time
+        return _hit_flash(self.analysis.strong_beats, when, 0.04, 0.28)
+
+    def beat_lift(self, star: Star, time: float | None = None) -> float:
+        """How much this star brightens for the current beat. The live phrase answers hardest."""
+        when = self.time if time is None else time
+        beat = self.beat_level(when)
+        strong = self.strong_level(when)
+        if star.phrase == self.active_phrase(when):
+            return 0.4 * beat + 0.22 * strong
+        return 0.1 * beat
+
+    def life(self, phrase: int, time: float | None = None) -> float:
+        """Older figures ease out. The latest one stays, so the sky is never a frozen poster."""
+        when = self.time if time is None else time
+        spans = self.phrase_span or {}
+        span = spans.get(phrase)
+        if span is None:
+            return 1.0
+        _start, end = span
+        if phrase == self.latest_phrase():
+            return 1.0
+        fade_at = end + 6.5
+        if when <= fade_at:
+            return 1.0
+        return _smooth(1.0 - min(1.0, (when - fade_at) / 2.4))
+
+    def latest_phrase(self) -> int:
+        spans = self.phrase_span or {}
+        if not spans:
+            return -1
+        return max(spans, key=lambda phrase: spans[phrase][0])
+
+    def active_phrase(self, time: float | None = None) -> int:
+        when = self.time if time is None else time
+        spans = self.phrase_span or {}
+        best = -1
+        best_start = -1e9
+        for phrase, (start, end) in spans.items():
+            if start - 0.2 <= when <= end + 2.0 and start >= best_start:
+                best = phrase
+                best_start = start
+        if best >= 0:
+            return best
+        for phrase, (start, _end) in spans.items():
+            if start <= when and start >= best_start:
+                best = phrase
+                best_start = start
+        return best
+
+    def placed(self, star: Star, time: float | None = None) -> tuple[float, float]:
+        """A few pixels of outward breath on the live figure. Positions in the layout stay put."""
+        when = self.time if time is None else time
+        if star.phrase != self.active_phrase(when):
+            return star.x, star.y
+        centroid = (self.phrase_centroid or {}).get(star.phrase)
+        beat = self.beat_level(when)
+        energy = self.energy(when)
+        if centroid is None:
+            bob = (1.2 + 3.2 * beat) * math.sin(when * 6.0 + star.phase)
+            return star.x, star.y + bob
+        cx, cy = centroid
+        dx, dy = star.x - cx, star.y - cy
+        dist = math.hypot(dx, dy)
+        push = (1.2 + 3.4 * beat) * (0.45 + 0.55 * energy)
+        sway = 1.3 * math.sin(when * 0.9 + star.phase)
+        if dist < 1.0:
+            return star.x, star.y + sway + push * math.sin(star.phase)
+        scale = (push + sway) / dist
+        return star.x + dx * scale, star.y + dy * scale
 
     def _target(self, time: float) -> tuple[float, float, float]:
-        # A small drift. Large camera motion would slide constellations into each other.
+        # Drift stays inside the layout margin. Zoom stays at 1 so edge stars are not pushed out.
+        energy = self.energy(time)
         return (
-            8.0 * math.sin(time * 0.045),
-            5.0 * math.cos(time * 0.032),
+            (8.0 + 6.0 * energy) * math.sin(time * 0.05),
+            (5.0 + 4.0 * energy) * math.cos(time * 0.036),
             1.0,
         )
 
@@ -1494,20 +1627,8 @@ def _build_stars(width: int, height: int, analysis: Analysis, seed: int) -> Star
     tones = extract_tones(analysis)
     if not tones:
         tones = [Tone(float(beat), 0.4, 60, "chroma") for beat in analysis.beats] or [Tone(0.0, 0.4, 60, "chroma")]
-    phrases: list[list[Tone]] = []
-    bucket: list[Tone] = []
-    for tone in tones:
-        section = section_at(analysis.sections, tone.time).label
-        if bucket:
-            gap = tone.time - bucket[-1].time
-            previous = section_at(analysis.sections, bucket[-1].time).label
-            # Short groups read as constellations. A whole verse on one line does not.
-            if gap > 1.15 or (section != previous and gap > 0.45) or len(bucket) >= 6:
-                phrases.append(bucket)
-                bucket = []
-        bucket.append(tone)
-    if bucket:
-        phrases.append(bucket)
+    tones = _accent_tones(analysis, tones)
+    phrases = _group_phrases(tones, analysis)
     stars, links = _layout_constellations(phrases, float(width), float(height), rng)
     dust = []
     occupied = [(star.x, star.y) for star in stars]
@@ -1536,42 +1657,140 @@ def _build_stars(width: int, height: int, analysis: Analysis, seed: int) -> Star
     scene.sync_report = {
         "stars": len(stars),
         "lines": len(links),
-        "phrases": len(phrases),
+        "phrases": len({star.phrase for star in stars}),
         "median_beat_gap_ms": round((gaps[len(gaps) // 2] if gaps else 0.0) * 1000.0, 1),
     }
+    spans: dict[int, tuple[float, float]] = {}
+    centroids: dict[int, tuple[float, float]] = {}
+    for star in stars:
+        start, end = spans.get(star.phrase, (star.time, star.time))
+        spans[star.phrase] = (min(start, star.time), max(end, star.time))
+    for phrase, start_end in spans.items():
+        del start_end
+        members = [star for star in stars if star.phrase == phrase]
+        centroids[phrase] = (
+            sum(star.x for star in members) / len(members),
+            sum(star.y for star in members) / len(members),
+        )
+    scene.phrase_span = spans
+    scene.phrase_centroid = centroids
     scene._cam_x, scene._cam_y, scene._cam_zoom = scene._target(0.0)
     scene.cam_x, scene.cam_y, scene.cam_zoom = scene._cam_x, scene._cam_y, scene._cam_zoom
     return scene
 
 
+def _accent_tones(analysis: Analysis, tones: list[Tone]) -> list[Tone]:
+    """Melody draws the figures. A thin melody borrows strong beats so the sky is not one stray dot."""
+    ordered = sorted(tones, key=lambda tone: tone.time)
+    strong = [float(hit) for hit in analysis.strong_beats] or [float(hit) for hit in list(analysis.beats)[::2]]
+    if not ordered or not strong:
+        return ordered
+    gaps = [right.time - left.time for left, right in zip(ordered, ordered[1:])]
+    median = gaps[len(gaps) // 2] if gaps else 9.0
+    sparse = median > 1.35 or len(ordered) < 10
+    extras: list[Tone] = []
+    if sparse:
+        for hit in strong:
+            if any(abs(hit - tone.time) < 0.18 for tone in ordered):
+                continue
+            extras.append(Tone(float(hit), 0.24, 70, "beat"))
+    else:
+        for left, right in zip(ordered, ordered[1:]):
+            span = right.time - left.time
+            if span < 0.8 or span > 1.9:
+                continue
+            hits = [hit for hit in strong if left.time + 0.26 < hit < right.time - 0.2]
+            if hits:
+                extras.append(Tone(float(hits[len(hits) // 2]), 0.2, 70, "beat"))
+    return sorted([*ordered, *extras], key=lambda tone: tone.time)
+
+
+def _group_phrases(tones: list[Tone], analysis: Analysis, gap: float = 2.7, maxlen: int = 6) -> list[list[Tone]]:
+    """A phrase is a short bent figure. A rest can sit inside it; a whole verse cannot."""
+    del analysis
+    phrases: list[list[Tone]] = []
+    bucket: list[Tone] = []
+    for tone in tones:
+        if bucket and (tone.time - bucket[-1].time > gap or len(bucket) >= maxlen):
+            phrases.append(bucket)
+            bucket = []
+        bucket.append(tone)
+    if bucket:
+        phrases.append(bucket)
+    merged: list[list[Tone]] = []
+    for phrase in phrases:
+        if not merged:
+            merged.append(list(phrase))
+            continue
+        silence = phrase[0].time - merged[-1][-1].time
+        room = len(merged[-1]) + len(phrase) <= maxlen
+        # A single leftover joins its neighbor so it does not sit in the sky as a stray dot.
+        orphan = len(phrase) == 1 or len(merged[-1]) == 1
+        if silence <= 3.6 and (room or (orphan and len(merged[-1]) + len(phrase) <= maxlen + 1)):
+            merged[-1].extend(phrase)
+        else:
+            merged.append(list(phrase))
+    return merged
+
+
+STAR_MARGIN = 108.0
+STAR_GAP = 64.0
+
+
+def _min_pair(points: list[tuple[float, float]]) -> float:
+    if len(points) < 2:
+        return 1e6
+    best = 1e6
+    for index, (ax, ay) in enumerate(points):
+        for bx, by in points[index + 1 :]:
+            best = min(best, math.hypot(ax - bx, ay - by))
+    return best
+
+
 def _layout_constellations(phrases: list[list[Tone]], width: float, height: float, rng: list[int]):
     """Each phrase is a small hooked figure in its own part of the sky. Lines stay a simple chain."""
+    cap = 0.22 * min(width, height)
     pending = []
     for index, phrase in enumerate(phrases):
         local = _organic_points(len(phrase), rng)
         radius = max((math.hypot(x, y) for x, y in local), default=0.0)
+        if radius > cap and radius > 1.0:
+            shrink = cap / radius
+            closest = _min_pair(local)
+            if closest * shrink < STAR_GAP:
+                shrink = STAR_GAP / closest
+            local = [(x * shrink, y * shrink) for x, y in local]
+            radius *= shrink
         pending.append((index, phrase, local, radius))
     pending.sort(key=lambda item: -item[3])
     placed: list[tuple[float, float, float]] = []
-    origins: dict[int, tuple[float, float]] = {}
+    occupied: list[tuple[float, float]] = []
+    seated: dict[int, tuple[tuple[float, float], list[tuple[float, float]]]] = {}
     for index, phrase, local, radius in pending:
-        origin = _seat_figure(radius, placed, width, height, rng)
-        placed.append((origin[0], origin[1], radius))
-        origins[index] = origin
+        found = _seat_phrase(local, radius, placed, occupied, width, height, rng)
+        if found is None:
+            continue
+        origin, points, used_radius = found
+        placed.append((origin[0], origin[1], used_radius))
+        occupied.extend((origin[0] + x, origin[1] + y) for x, y in points)
+        seated[index] = (origin, points)
     stars: list[Star] = []
     links: list[tuple[int, int]] = []
     for index, phrase in enumerate(phrases):
-        local = next(item[2] for item in pending if item[0] == index)
-        ox, oy = origins[index]
+        if index not in seated:
+            continue
+        (ox, oy), local = seated[index]
         peak = max(tone.midi for tone in phrase)
         first = len(stars)
         for place, tone in enumerate(phrase):
             x, y = local[place]
             scale = 0.48 + xorshift32(rng) * 0.72
-            if tone.midi == peak:
+            if tone.midi == peak and tone.source != "beat":
                 scale += 0.28
-            scale = min(1.45, scale)
-            warmth = xorshift32(rng)
+            if tone.source == "beat":
+                scale *= 0.62
+            scale = min(1.35, scale)
+            warmth = 0.12 + xorshift32(rng) * 0.2 if tone.source == "beat" else xorshift32(rng)
             stars.append(
                 Star(
                     tone.time,
@@ -1582,6 +1801,7 @@ def _layout_constellations(phrases: list[list[Tone]], width: float, height: floa
                     index,
                     scale,
                     warmth,
+                    tone.source,
                 )
             )
             if place:
@@ -1589,35 +1809,104 @@ def _layout_constellations(phrases: list[list[Tone]], width: float, height: floa
     return stars, links
 
 
-def _seat_figure(radius: float, placed: list[tuple[float, float, float]], width: float, height: float, rng: list[int]) -> tuple[float, float]:
-    margin_x = 90.0 + radius
-    margin_y = 70.0 + radius
-    sky_bottom = height * 0.84
-    best = (width * 0.5, height * 0.35)
+def _seat_phrase(
+    local: list[tuple[float, float]],
+    radius: float,
+    placed: list[tuple[float, float, float]],
+    occupied: list[tuple[float, float]],
+    width: float,
+    height: float,
+    rng: list[int],
+) -> tuple[tuple[float, float], list[tuple[float, float]], float] | None:
+    """Shrink a figure until it sits inside the frame and clear of the others. Otherwise leave it out."""
+    closest = _min_pair(local)
+    for shrink in (1.0, 0.94):
+        if closest * shrink < STAR_GAP:
+            continue
+        points = [(x * shrink, y * shrink) for x, y in local]
+        used = radius * shrink
+        origin = _seat_figure(used, placed, width, height, rng, points, occupied)
+        if origin is None:
+            continue
+        return origin, points, used
+    return None
+
+
+def _seat_figure(
+    radius: float,
+    placed: list[tuple[float, float, float]],
+    width: float,
+    height: float,
+    rng: list[int],
+    points: list[tuple[float, float]] | None = None,
+    occupied: list[tuple[float, float]] | None = None,
+) -> tuple[float, float] | None:
+    points = points or [(0.0, 0.0)]
+    occupied = occupied or []
+    margin = STAR_MARGIN
+    span_x = max(abs(x) for x, _ in points)
+    span_y = max(abs(y) for _, y in points)
+    margin_x = margin + span_x
+    margin_y = margin + span_y
+    if width <= margin_x * 2 or height <= margin_y * 2:
+        return None
+    best = None
     best_clear = -1.0
-    for attempt in range(48):
-        cx = margin_x + xorshift32(rng) * max(1.0, width - 2.0 * margin_x)
-        cy = margin_y + xorshift32(rng) * max(1.0, sky_bottom - 2.0 * margin_y)
+    best_score = -1e9
+    order = len(placed)
+    target_x = width * (0.3 if order % 2 == 0 else 0.7)
+    target_y = min(height - margin_y, height * (0.22 + 0.18 * order))
+
+    def consider(cx: float, cy: float) -> bool:
+        nonlocal best, best_clear, best_score
+        if not _points_inside(cx, cy, points, width, height, margin):
+            return False
         clear = _clearance(cx, cy, radius, placed)
-        if clear >= 62.0:
-            return cx, cy
-        if clear > best_clear:
-            best, best_clear = (cx, cy), clear
-    # A loose scatter, still not a row: walk a jittered lattice and keep the roomiest cell.
-    cols = max(2, int(width // 340))
-    rows = max(2, int(sky_bottom // 240))
+        if clear < 28.0 or not _points_apart(cx, cy, points, occupied, STAR_GAP):
+            return False
+        # Among clear seats, walk down the sky so a tall frame does not leave the bottom empty.
+        score = clear - 0.2 * math.hypot(cx - target_x, cy - target_y)
+        if score > best_score:
+            best, best_score, best_clear = (cx, cy), score, clear
+        return False
+
+    for _attempt in range(72):
+        cx = margin_x + xorshift32(rng) * (width - 2.0 * margin_x)
+        cy = margin_y + xorshift32(rng) * (height - 2.0 * margin_y)
+        if consider(cx, cy):
+            return best
+    cols = max(2, int(width // 280))
+    rows = max(2, int(height // 220))
     for row in range(rows):
         for col in range(cols):
-            jx = (xorshift32(rng) - 0.5) * 80.0
-            jy = (xorshift32(rng) - 0.5) * 50.0
+            jx = (xorshift32(rng) - 0.5) * 60.0
+            jy = (xorshift32(rng) - 0.5) * 40.0
             cx = width * (col + 0.5) / cols + jx
-            cy = sky_bottom * (row + 0.45) / rows + jy
-            cx = min(width - 60.0, max(60.0, cx))
-            cy = min(sky_bottom - 40.0, max(50.0, cy))
-            clear = _clearance(cx, cy, radius, placed)
-            if clear > best_clear:
-                best, best_clear = (cx, cy), clear
-    return best
+            cy = height * (row + 0.5) / rows + jy
+            cx = min(width - margin_x, max(margin_x, cx))
+            cy = min(height - margin_y, max(margin_y, cy))
+            if consider(cx, cy):
+                return best
+    if best is not None and best_clear >= 28.0:
+        return best
+    return None
+
+
+def _points_inside(cx: float, cy: float, points, width: float, height: float, margin: float) -> bool:
+    for x, y in points:
+        px, py = cx + x, cy + y
+        if px < margin or py < margin or px > width - margin or py > height - margin:
+            return False
+    return True
+
+
+def _points_apart(cx: float, cy: float, points, occupied: list[tuple[float, float]], gap: float) -> bool:
+    for x, y in points:
+        px, py = cx + x, cy + y
+        for ox, oy in occupied:
+            if math.hypot(px - ox, py - oy) < gap:
+                return False
+    return True
 
 
 def _clearance(cx: float, cy: float, radius: float, placed: list[tuple[float, float, float]]) -> float:
@@ -1736,12 +2025,15 @@ def _star_tint(warmth: float) -> tuple[float, float, float]:
     )
 
 
-def _paint_star_glyph(ctx, x: float, y: float, level: float, warmth: float, phase: float, time: float, scale: float = 1.0) -> None:
-    """A bright core with a wide soft glow. Spikes stay short and fade."""
-    twinkle = 0.9 + 0.1 * math.sin(time * 2.1 + phase)
+def _paint_star_glyph(
+    ctx, x: float, y: float, level: float, warmth: float, phase: float, time: float, scale: float = 1.0, pop: float = 0.0
+) -> None:
+    """A soft core at rest. Spikes and the halo open on the beat, then ease back."""
+    twinkle = 0.92 + 0.08 * math.sin(time * 2.4 + phase)
     tint = _star_tint(warmth)
-    spike = (9.0 + 10.0 * level) * (0.75 + 0.45 * scale) * twinkle
-    glow_r = (10.0 + 16.0 * scale) * (0.65 + 0.35 * level)
+    opened = 1.0 + pop
+    spike = (3.4 + 14.0 * level) * (0.8 + 0.26 * scale) * twinkle * opened
+    glow_r = (8.0 + 16.0 * level) * (0.75 + 0.3 * scale) * (1.0 + 0.85 * pop)
     glow = cairo.RadialGradient(x, y, 0.4, x, y, glow_r)
     glow.add_color_stop_rgba(0, 1, 1, 1, min(1.0, 0.95 * level * twinkle))
     glow.add_color_stop_rgba(0.22, tint[0], tint[1], tint[2], 0.72 * level * twinkle)
@@ -1807,108 +2099,207 @@ def _blur_rgba(surface, radius: int) -> None:
     surface.mark_dirty()
 
 
-def _paint_luminous_sky(ctx, width: float, height: float) -> None:
-    """Milky way and nebulae added on top of the sky. They can only lighten it.
-
-    The frame is painted with OPERATOR_SOURCE, so a translucent fill would replace
-    the sky with a dark premultiplied color. This layer is blurred, then added.
-    """
-    glow_w = max(8, int(width) // 4)
-    glow_h = max(8, int(height) // 4)
-    surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, glow_w, glow_h)
-    glow = cairo.Context(surface)
-    glow.set_operator(cairo.OPERATOR_SOURCE)
-    glow.set_source_rgba(0, 0, 0, 0)
-    glow.paint()
-    glow.set_operator(cairo.OPERATOR_OVER)
-    glow.scale(glow_w / width, glow_h / height)
-    glow.save()
-    glow.translate(width * 0.56, height * 0.42)
-    glow.rotate(-0.26)
-    band = cairo.LinearGradient(0, -260, 0, 260)
-    band.add_color_stop_rgba(0.0, 0.72, 0.68, 0.95, 0.0)
-    band.add_color_stop_rgba(0.5, 0.88, 0.84, 1.0, 0.9)
-    band.add_color_stop_rgba(1.0, 0.65, 0.6, 0.92, 0.0)
-    glow.set_source(band)
-    glow.rectangle(-width * 1.4, -280, width * 2.8, 560)
-    glow.fill()
-    glow.restore()
-    for ox, oy, radius, tint, alpha in (
-        (width * 0.3, height * 0.34, 420.0, (0.72, 0.62, 1.0), 0.55),
-        (width * 0.68, height * 0.5, 480.0, (0.62, 0.74, 1.0), 0.42),
-        (width * 0.48, height * 0.24, 300.0, (1.0, 0.86, 0.72), 0.28),
-    ):
-        blob = cairo.RadialGradient(ox, oy, radius * 0.02, ox, oy, radius)
-        blob.add_color_stop_rgba(0.0, tint[0], tint[1], tint[2], alpha)
-        blob.add_color_stop_rgba(0.45, tint[0], tint[1], tint[2], alpha * 0.4)
-        blob.add_color_stop_rgba(1.0, tint[0], tint[1], tint[2], 0.0)
-        glow.set_source(blob)
-        glow.rectangle(ox - radius, oy - radius, radius * 2, radius * 2)
-        glow.fill()
-    _blur_rgba(surface, 6)
+def _paint_luminous_sky(ctx, scene: StarScene) -> None:
+    """Milky way and nebulae. They only lighten the sky, and they swell with the bass and the beat."""
+    width, height = scene.width, scene.height
+    energy = scene.energy()
+    low, _high = scene.bands()
+    beat = scene.beat_level()
+    strong = scene.strong_level()
+    lift = 0.7 + 0.85 * energy + 0.55 * low + 0.7 * beat + 0.35 * strong
+    drift = math.sin(scene.time * 0.08) * 26.0 + math.sin(scene.time * 0.21) * 8.0
+    sway = math.cos(scene.time * 0.06) * 14.0
     ctx.save()
     ctx.set_operator(cairo.OPERATOR_ADD)
-    pattern = cairo.SurfacePattern(surface)
-    pattern.set_filter(cairo.FILTER_BILINEAR)
-    pattern.set_matrix(cairo.Matrix(xx=glow_w / float(width), yy=glow_h / float(height)))
-    ctx.set_source(pattern)
-    ctx.paint_with_alpha(0.42)
+    ctx.save()
+    ctx.translate(width * 0.56 + drift, height * 0.42 + sway * 0.4)
+    ctx.rotate(-0.26 + 0.03 * math.sin(scene.time * 0.05))
+    band_h = (200.0 + 70.0 * low + 24.0 * beat) * (0.85 if height > width else 1.0)
+    band = cairo.LinearGradient(0, -band_h, 0, band_h)
+    mid = min(0.2, 0.055 + 0.06 * energy + 0.05 * low + 0.07 * beat)
+    band.add_color_stop_rgba(0.0, 0.72, 0.68, 0.95, 0.0)
+    band.add_color_stop_rgba(0.5, 0.9, 0.86, 1.0, mid)
+    band.add_color_stop_rgba(1.0, 0.65, 0.6, 0.92, 0.0)
+    ctx.set_source(band)
+    ctx.rectangle(-width * 1.3, -band_h, width * 2.6, band_h * 2.0)
+    ctx.fill()
+    ctx.restore()
+    for ox, oy, radius, tint, alpha in (
+        (0.28, 0.38, 0.34, (0.55, 0.5, 0.95), 0.045),
+        (0.7, 0.55, 0.38, (0.45, 0.62, 0.98), 0.04),
+        (0.48, 0.28, 0.26, (0.7, 0.62, 0.95), 0.028),
+    ):
+        x = ox * width + drift * 0.45
+        y = oy * height + sway * 0.3
+        reach = radius * min(width, height) * (0.92 + 0.16 * low + 0.08 * beat)
+        blob = cairo.RadialGradient(x, y, reach * 0.02, x, y, reach)
+        strength = alpha * lift
+        blob.add_color_stop_rgba(0.0, tint[0], tint[1], tint[2], strength)
+        blob.add_color_stop_rgba(0.5, tint[0], tint[1], tint[2], strength * 0.35)
+        blob.add_color_stop_rgba(1.0, tint[0], tint[1], tint[2], 0.0)
+        ctx.set_source(blob)
+        ctx.arc(x, y, reach, 0, math.tau)
+        ctx.fill()
     ctx.restore()
 
 
 def _paint_stars(ctx, scene: StarScene) -> None:
     width, height = scene.width, scene.height
+    energy = scene.energy()
+    beat = scene.beat_level()
     gradient = cairo.LinearGradient(0, 0, 0, height)
-    gradient.add_color_stop_rgb(0, 0.045, 0.055, 0.16)
-    gradient.add_color_stop_rgb(0.34, 0.09, 0.055, 0.18)
-    gradient.add_color_stop_rgb(0.66, 0.11, 0.07, 0.17)
-    gradient.add_color_stop_rgb(1, 0.05, 0.04, 0.10)
+    gradient.add_color_stop_rgb(0, 0.04 + 0.03 * energy, 0.05, 0.15 + 0.05 * energy + 0.03 * beat)
+    gradient.add_color_stop_rgb(0.4, 0.07 + 0.04 * energy, 0.05, 0.16 + 0.04 * beat)
+    gradient.add_color_stop_rgb(1, 0.035, 0.03, 0.08)
     ctx.set_operator(cairo.OPERATOR_SOURCE)
     ctx.set_source(gradient)
     ctx.paint()
     # Everything after the opaque sky must blend. SOURCE would punch dark holes.
     ctx.set_operator(cairo.OPERATOR_OVER)
-    _paint_luminous_sky(ctx, width, height)
+    _paint_luminous_sky(ctx, scene)
     ctx.set_operator(cairo.OPERATOR_OVER)
     ctx.save()
     ctx.translate(width / 2.0, height / 2.0)
     ctx.scale(scene.cam_zoom, scene.cam_zoom)
     ctx.translate(-width / 2.0 + scene.cam_x, -height / 2.0 + scene.cam_y)
+    _low, high = scene.bands()
     for x, y, scale, warmth, phase in scene.dust:
-        twinkle = 0.55 + 0.45 * math.sin(scene.time * 1.4 + phase)
+        speed = 0.8 + 5.5 * high
+        twinkle = 0.55 + 0.45 * math.sin(scene.time * speed + phase)
+        # Only the brighter specks answer the beat, so the field sparkles instead of flashing white.
+        spark = beat * max(0.0, math.sin(phase)) * (1.0 if scale > 0.85 else 0.25)
         tint = _star_tint(warmth)
-        alpha = (0.12 + 0.28 * min(1.0, scale)) * twinkle
-        ctx.set_source_rgba(tint[0], tint[1], tint[2], alpha)
-        ctx.arc(x, y, 0.7 + scale * 0.7, 0, math.tau)
+        alpha = (0.1 + 0.22 * high) * (0.45 + 0.55 * twinkle) + 0.42 * spark
+        drift_x = 8.0 * math.sin(scene.time * 0.16 + phase)
+        drift_y = 5.0 * math.cos(scene.time * 0.11 + warmth * 4.0)
+        ctx.set_source_rgba(tint[0], tint[1], tint[2], min(0.75, alpha))
+        ctx.arc(x + drift_x, y + drift_y, (0.6 + scale * 0.5) * (1.0 + 0.8 * spark), 0, math.tau)
         ctx.fill()
-        if scale > 1.05:
-            _fading_spike(ctx, x, y, phase, 4.5 + scale * 2.0, 0.7, tint, alpha * 0.8)
-            _fading_spike(ctx, x, y, phase + math.pi / 2.0, 5.5 + scale * 2.0, 0.7, tint, alpha * 0.7)
+    _paint_constellation_lines(ctx, scene)
+    _paint_phrase_ripple(ctx, scene)
+    _paint_beat_glint(ctx, scene)
+    for star in scene.stars:
+        x, y = scene.placed(star)
+        age = scene.time - star.time
+        if -0.5 < age < -0.22:
+            hint = _smooth((age + 0.5) / 0.28) * 0.4
+            ctx.set_source_rgba(0.8, 0.86, 1.0, hint)
+            ctx.arc(x, y, 1.6 + star.scale, 0, math.tau)
+            ctx.fill()
+            continue
+        level = scene.brightness(star)
+        if level <= 0.02:
+            continue
+        if 0.0 <= age < 0.4:
+            fade = 1.0 - age / 0.4
+            ring = (6.0 + age * 36.0) * (0.75 + 0.25 * star.scale)
+            ctx.set_source_rgba(1.0, 0.97, 0.92, 0.5 * fade)
+            ctx.set_line_width(1.15)
+            ctx.arc(x, y, ring, 0, math.tau)
+            ctx.stroke()
+        pop = scene.beat_level() if star.phrase == scene.active_phrase() else 0.18 * scene.beat_level()
+        if star.phrase == scene.active_phrase():
+            pop = min(1.0, pop + 0.4 * scene.strong_level())
+        _paint_star_glyph(ctx, x, y, level, star.warmth, star.phase, scene.time, star.scale, pop)
+    ctx.restore()
+
+
+def _paint_constellation_lines(ctx, scene: StarScene) -> None:
     ctx.set_line_cap(cairo.LINE_CAP_ROUND)
+    beat = scene.beat_level()
+    active = scene.active_phrase()
     for left, right in scene.links:
         a = scene.stars[left]
         b = scene.stars[right]
-        born = max(a.time, b.time)
-        age = scene.time - born
-        if age < 0.0:
+        life = min(scene.life(a.phrase), scene.life(b.phrase))
+        if life < 0.04:
             continue
-        appear = _smooth(min(1.0, age / 0.45))
-        if age < 5.0:
-            alpha = appear * 0.72
-        else:
-            alpha = max(0.16, 0.72 * _smooth(1.0 - (age - 5.0) / 7.0))
+        earlier, later = (a, b) if a.time <= b.time else (b, a)
+        age = scene.time - later.time
+        if age < -0.12:
+            continue
+        grow = 1.0 if age >= 0.32 else _smooth((age + 0.12) / 0.44)
+        ax, ay = scene.placed(earlier)
+        bx, by = scene.placed(later)
+        x2 = ax + (bx - ax) * grow
+        y2 = ay + (by - ay) * grow
+        hot = beat if a.phrase == active else 0.0
+        alpha = (0.22 + 0.42 * grow + 0.5 * hot) * life
         tint = _star_tint((a.warmth + b.warmth) * 0.5)
-        ctx.set_source_rgba(tint[0], tint[1], tint[2], alpha)
-        ctx.set_line_width(1.55)
-        ctx.move_to(a.x, a.y)
-        ctx.line_to(b.x, b.y)
+        ctx.set_source_rgba(tint[0], tint[1], tint[2], min(0.55, alpha * 0.45))
+        ctx.set_line_width(2.6 + 2.4 * hot)
+        ctx.move_to(ax, ay)
+        ctx.line_to(x2, y2)
         ctx.stroke()
-    for star in scene.stars:
-        level = scene.brightness(star)
-        if level <= 0.01:
-            continue
-        _paint_star_glyph(ctx, star.x, star.y, level, star.warmth, star.phase, scene.time, star.scale)
-    ctx.restore()
+        ctx.set_source_rgba(min(1.0, tint[0] + 0.2), min(1.0, tint[1] + 0.15), 1.0, min(0.95, alpha))
+        ctx.set_line_width(0.8 + 1.5 * hot)
+        ctx.move_to(ax, ay)
+        ctx.line_to(x2, y2)
+        ctx.stroke()
+
+
+def _paint_beat_glint(ctx, scene: StarScene) -> None:
+    """One soft light runs the live constellation once per beat."""
+    phrase = scene.active_phrase()
+    if phrase < 0:
+        return
+    chain = [(scene.stars[a], scene.stars[b]) for a, b in scene.links if scene.stars[a].phrase == phrase]
+    if not chain:
+        return
+    age = _since(scene.analysis.beats, scene.time)
+    if age is None or age > 0.32:
+        return
+    u = age / 0.32
+    slot = u * len(chain)
+    index = min(len(chain) - 1, int(slot))
+    local = slot - index
+    earlier, later = chain[index]
+    if earlier.time > later.time:
+        earlier, later = later, earlier
+    ax, ay = scene.placed(earlier)
+    bx, by = scene.placed(later)
+    x = ax + (bx - ax) * local
+    y = ay + (by - ay) * local
+    fade = math.sin(math.pi * min(1.0, u))
+    glow = cairo.RadialGradient(x, y, 0.6, x, y, 18.0)
+    glow.add_color_stop_rgba(0.0, 1.0, 1.0, 1.0, 0.95 * fade)
+    glow.add_color_stop_rgba(0.45, 0.8, 0.88, 1.0, 0.35 * fade)
+    glow.add_color_stop_rgba(1.0, 0.7, 0.8, 1.0, 0.0)
+    ctx.set_source(glow)
+    ctx.arc(x, y, 18.0, 0, math.tau)
+    ctx.fill()
+
+
+def _paint_phrase_ripple(ctx, scene: StarScene) -> None:
+    """A soft ring opens from the live figure on each beat and dies before the next constellation."""
+    phrase = scene.active_phrase()
+    members = [star for star in scene.stars if star.phrase == phrase and scene.life(phrase) > 0.2]
+    if len(members) < 1:
+        return
+    age = _since(scene.analysis.beats, scene.time)
+    if age is None or age > 0.42:
+        return
+    cx = sum(scene.placed(star)[0] for star in members) / len(members)
+    cy = sum(scene.placed(star)[1] for star in members) / len(members)
+    reach = max(math.hypot(scene.placed(star)[0] - cx, scene.placed(star)[1] - cy) for star in members)
+    u = age / 0.42
+    radius = 8.0 + u * min(100.0, reach + 16.0)
+    alpha = 0.42 * (1.0 - u) * (0.65 + 0.35 * scene.strong_level())
+    ctx.set_line_width(1.4)
+    ctx.set_source_rgba(0.85, 0.9, 1.0, alpha)
+    ctx.arc(cx, cy, radius, 0, math.tau)
+    ctx.stroke()
+
+
+def _since(times: list[float], now: float) -> float | None:
+    last = None
+    for hit in times:
+        if hit > now:
+            break
+        last = hit
+    if last is None:
+        return None
+    return now - last
 
 
 def build_form(kind: str, width: int, height: int, analysis: Analysis, seed: int, theme: str = "neon"):
