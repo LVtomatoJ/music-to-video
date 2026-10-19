@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "music2video"
+version = "1.0.0"
+description = "Render a beat-reactive bouncing-ball animation to MP4"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+dependencies = [
+  "numpy>=1.26",
+  "librosa>=0.10",
+  "pycairo>=1.25",
+]
+
+[project.scripts]
+music2video = "music2video.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["music2video*"]

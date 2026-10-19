@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>节拍成片 · music to video</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <header>
+      <p class="kicker">music to video</p>
+      <h1>节拍成片</h1>
+      <p class="lede">歌留在这台浏览器里。先听成节拍，再选一个跟着响的画面。</p>
+    </header>
+    <main>
+      <section class="stage" id="stage">
+        <canvas id="view" width="1600" height="900"></canvas>
+        <div class="transport">
+          <button id="play" type="button" aria-label="播放">▶</button>
+          <input id="seek" type="range" min="0" max="24" step="0.001" value="0" aria-label="时间" />
+          <span id="clock">0:00</span>
+        </div>
+      </section>
+      <aside>
+        <label class="upload" id="drop">
+          <input id="file" type="file" accept="audio/*,.mp3,.wav,.m4a,.flac,.ogg" />
+          <span class="upload-title">上传一首歌</span>
+          <span class="upload-hint">mp3、wav，分析在本地完成</span>
+        </label>
+        <p id="status">示例节奏。上传后会换成这首歌自己的拍子。</p>
+        <h2>模板</h2>
+        <div id="templates" class="templates"></div>
+        <h2>画面</h2>
+        <form id="params" class="params"></form>
+        <h2>这首歌</h2>
+        <dl id="facts" class="facts"></dl>
+        <div class="actions">
+          <button id="export" type="button">导出 MP4</button>
+          <button id="json" type="button" class="ghost">下载 MusicData</button>
+        </div>
+        <p class="fine">预览可以随便拖时间。导出用 WebCodecs 在这台电脑上编码，歌不会上传。</p>
+      </aside>
+    </main>
+    <audio id="song" preload="auto"></audio>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

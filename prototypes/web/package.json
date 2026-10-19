@@ -1,0 +1,21 @@
+{
+  "name": "web",
+  "version": "1.0.0",
+  "description": "",
+  "main": "dist/drive.js",
+  "scripts": {
+    "build": "esbuild src/main.ts --bundle --outfile=dist/main.js --format=iife --target=chrome120 && esbuild src/drive.ts --bundle --outfile=dist/drive.js --platform=node --format=cjs --target=node22 --external:puppeteer-core",
+    "start": "node dist/drive.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "mp4-muxer": "^5.2.2",
+    "puppeteer-core": "^25.14.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2",
+    "typescript": "^7.0.2"
+  }
+}
