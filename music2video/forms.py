@@ -1491,6 +1491,10 @@ class StarScene:
     _cam_x: float = 0.0
     _cam_y: float = 0.0
     _cam_zoom: float = 1.0
+    # Steady clock for drift. The renderer samples a frame on its beat, which
+    # would hitch a sine; musical flashes still read `time`.
+    _drift: float = -1.0
+    _weights: dict | None = None
 
     def brightness(self, star: Star, time: float | None = None) -> float:
         when = self.time if time is None else time
@@ -1503,7 +1507,15 @@ class StarScene:
         if life <= 0.0:
             return 0.0
         flash = math.exp(-age * 3.4)
-        rest = 0.46 + 0.08 * math.sin(when * (1.5 + 1.8 * self.energy(when)) + star.phase)
+        mix = self.slow_mix(when)
+        depth = 0.08
+        rate = 1.5 + 1.8 * self.energy(when)
+        clock = when if mix <= 0.0 else self.drift_time(when)
+        if mix > 0.0:
+            # A slow bar would otherwise sit at one brightness between hits.
+            depth = 0.08 + 0.12 * mix
+            rate *= 1.0 - 0.28 * mix
+        rest = 0.46 + depth * math.sin(clock * rate + star.phase)
         level = rest + (1.0 - rest) * flash + self.beat_lift(star, when)
         return max(0.0, min(1.0, level * life))
 
@@ -1526,14 +1538,97 @@ class StarScene:
         high = float(sum(row[-3:]) / max(1, min(3, len(row))))
         return low, high
 
+    def pulse_gap(self, time: float | None = None) -> float:
+        """Median of the beat intervals nearest `time`, in seconds."""
+        when = self.time if time is None else time
+        beats = self.analysis.beats
+        if len(beats) < 2:
+            tempo = float(self.analysis.tempo or 0.0)
+            return 60.0 / tempo if tempo > 1.0 else 0.5
+        gaps = [beats[i] - beats[i - 1] for i in range(1, len(beats))]
+        center = 0
+        for index, start in enumerate(beats[:-1]):
+            if start <= when:
+                center = index
+            else:
+                break
+        lo = max(0, center - 1)
+        hi = min(len(gaps), center + 2)
+        sample = sorted(gaps[lo:hi])
+        return max(0.2, sample[len(sample) // 2])
+
+    def slow_mix(self, time: float | None = None) -> float:
+        """0 on a fast pulse, 1 when a bar is long enough that a short flash would freeze.
+
+        107 BPM (0.56s) still uses the existing hit. By 67 BPM (0.90s) the picture
+        has eased into the slow drift.
+        """
+        gap = self.pulse_gap(time)
+        if gap <= 0.56:
+            return 0.0
+        if gap >= 0.90:
+            return 1.0
+        return _smooth((gap - 0.56) / (0.90 - 0.56))
+
+    def drift_time(self, when: float) -> float:
+        """Clock for continuous motion. A direct query uses `when` unchanged."""
+        if self._drift < 0.0 or abs(when - self.time) > 1e-4 or self.slow_mix(when) <= 0.0:
+            return when
+        return self._drift
+
+    def _event_window(self, time: float, base: float, fraction: float, cap: float) -> float:
+        """How long a beat gesture lasts. Fast songs keep `base` exactly."""
+        mix = self.slow_mix(time)
+        if mix <= 0.0:
+            return base
+        gap = self.pulse_gap(time)
+        slow = min(cap, max(base, gap * fraction))
+        # End before the next beat, or the gesture restarts mid-travel and jumps.
+        slow = min(slow, max(base, gap * 0.94))
+        return base + mix * (slow - base)
+
+    def _envelope(self, times, when: float, rise: float, release: float) -> float:
+        mix = self.slow_mix(when)
+        if mix > 0.0:
+            gap = self.pulse_gap(when)
+            # The frame before a beat is up to two frames early, because that
+            # frame is drawn on the beat itself. A longer rise is already bright
+            # by then, so the hit is not a one-frame slam.
+            slow_rise = min(0.26, max(rise, gap * 0.24))
+            slow_release = min(0.62, max(release, gap * 0.46))
+            rise = rise + mix * (slow_rise - rise)
+            release = release + mix * (slow_release - release)
+            span = rise + release
+            limit = gap * 0.92
+            if span > limit > 0.0:
+                rise *= limit / span
+                release *= limit / span
+        return _hit_flash(times, when, rise, release)
+
     def beat_level(self, time: float | None = None) -> float:
         when = self.time if time is None else time
         # Peak on the beat itself. The frame that contains the hit is the bright one.
-        return _hit_flash(self.analysis.beats, when, 0.04, 0.22)
+        return self._envelope(self.analysis.beats, when, 0.04, 0.22)
 
     def strong_level(self, time: float | None = None) -> float:
         when = self.time if time is None else time
-        return _hit_flash(self.analysis.strong_beats, when, 0.04, 0.28)
+        return self._envelope(self.analysis.strong_beats, when, 0.04, 0.28)
+
+    def glint_u(self, time: float | None = None) -> float | None:
+        """0..1 along the live figure for this beat, or None once the light has passed.
+
+        Fast songs cross in 0.32s, same as before. Slow songs ease across most of the bar.
+        """
+        when = self.time if time is None else time
+        age = _since(self.analysis.beats, when)
+        window = self._event_window(when, 0.32, 0.88, 1.25)
+        if age is None or age > window or window <= 0.0:
+            return None
+        u = age / window
+        mix = self.slow_mix(when)
+        if mix <= 0.0:
+            return u
+        return u + mix * (_smooth(u) - u)
 
     def beat_lift(self, star: Star, time: float | None = None) -> float:
         """How much this star brightens for the current beat. The live phrase answers hardest."""
@@ -1583,38 +1678,96 @@ class StarScene:
         return best
 
     def placed(self, star: Star, time: float | None = None) -> tuple[float, float]:
-        """A few pixels of outward breath on the live figure. Positions in the layout stay put."""
+        """A few pixels of outward breath on the live figure. Positions in the layout stay put.
+
+        On a fast pulse this is the beat swell only. On a slow pulse the live figure
+        also floats, and it eases back into the layout instead of snapping.
+        """
         when = self.time if time is None else time
-        if star.phrase != self.active_phrase(when):
+        mix = self.slow_mix(when)
+        active = star.phrase == self.active_phrase(when)
+        weight = 1.0
+        if mix > 0.0:
+            weights = self._weights or {}
+            if star.phrase in weights:
+                weight = weights[star.phrase]
+            elif not active:
+                weight = 0.0
+            if weight < 0.02:
+                return star.x, star.y
+        elif not active:
             return star.x, star.y
+        clock = when if mix <= 0.0 else self.drift_time(when)
         centroid = (self.phrase_centroid or {}).get(star.phrase)
         beat = self.beat_level(when)
         energy = self.energy(when)
         if centroid is None:
-            bob = (1.2 + 3.2 * beat) * math.sin(when * 6.0 + star.phase)
-            return star.x, star.y + bob
+            bob = (1.2 + 3.2 * beat) * math.sin(clock * 6.0 + star.phase)
+            return star.x, star.y + bob * (1.0 if mix <= 0.0 else weight)
         cx, cy = centroid
         dx, dy = star.x - cx, star.y - cy
         dist = math.hypot(dx, dy)
         push = (1.2 + 3.4 * beat) * (0.45 + 0.55 * energy)
-        sway = 1.3 * math.sin(when * 0.9 + star.phase)
+        sway = 1.3 * math.sin(clock * 0.9 + star.phase)
+        ox = oy = 0.0
+        if mix > 0.0:
+            slow_sway = (4.2 + 1.4 * energy) * math.sin(clock * 0.62 + star.phase)
+            sway = (1.0 - mix) * sway + mix * slow_sway
+            # Fast enough to read between hits, slow enough that one frame never jumps.
+            float_amp = weight * mix * (18.0 + 12.0 * (1.0 - min(1.0, energy)))
+            ox = float_amp * math.sin(clock * 0.62 + star.phrase * 1.3)
+            oy = float_amp * 0.72 * math.cos(clock * 0.44 + star.phrase * 0.8)
+            ang = weight * mix * 0.07 * math.sin(clock * 0.28 + star.phrase)
+            cos = math.cos(ang)
+            sin = math.sin(ang)
+            dx, dy = dx * cos - dy * sin, dx * sin + dy * cos
+            dist = math.hypot(dx, dy)
+            push *= weight
+            sway *= weight
         if dist < 1.0:
-            return star.x, star.y + sway + push * math.sin(star.phase)
+            return star.x + ox, star.y + oy + sway + push * math.sin(star.phase)
         scale = (push + sway) / dist
-        return star.x + dx * scale, star.y + dy * scale
+        return star.x + dx * scale + ox, star.y + dy * scale + oy
 
     def _target(self, time: float) -> tuple[float, float, float]:
         # Drift stays inside the layout margin. Zoom stays at 1 so edge stars are not pushed out.
         energy = self.energy(time)
+        mix = self.slow_mix(time)
+        clock = time if mix <= 0.0 else self.drift_time(time)
+        amp_x = (8.0 + 6.0 * energy) + mix * (22.0 + 6.0 * energy)
+        amp_y = (5.0 + 4.0 * energy) + mix * (14.0 + 4.0 * energy)
         return (
-            (8.0 + 6.0 * energy) * math.sin(time * 0.05),
-            (5.0 + 4.0 * energy) * math.cos(time * 0.036),
+            amp_x * math.sin(clock * (0.05 + 0.20 * mix)),
+            amp_y * math.cos(clock * (0.036 + 0.15 * mix)),
             1.0,
         )
 
+    def _advance_drift(self, dt: float, time: float) -> None:
+        if self._drift < 0.0:
+            self._drift = time
+            return
+        delta = time - self._drift
+        if delta < -1e-3 or delta > 0.45:
+            self._drift = time
+            return
+        self._drift += dt
+
+    def _advance_weights(self, dt: float, time: float) -> None:
+        if self.slow_mix(time) <= 0.0:
+            return
+        if self._weights is None:
+            self._weights = {}
+        active = self.active_phrase(time)
+        for phrase in self.phrase_span or {}:
+            target = 1.0 if phrase == active else 0.0
+            current = self._weights.get(phrase, target)
+            self._weights[phrase] = _damp(current, target, dt, 4.0)
+
     def update(self, dt: float, time: float, events: list[tuple[float, bool]]) -> None:
         del events
+        self._advance_drift(dt, time)
         self.time = time
+        self._advance_weights(dt, time)
         tx, ty, tz = self._target(time)
         self._cam_x = _damp(self._cam_x, tx, dt, 0.8)
         self._cam_y = _damp(self._cam_y, ty, dt, 0.8)
@@ -2107,13 +2260,17 @@ def _paint_luminous_sky(ctx, scene: StarScene) -> None:
     beat = scene.beat_level()
     strong = scene.strong_level()
     lift = 0.7 + 0.85 * energy + 0.55 * low + 0.7 * beat + 0.35 * strong
-    drift = math.sin(scene.time * 0.08) * 26.0 + math.sin(scene.time * 0.21) * 8.0
-    sway = math.cos(scene.time * 0.06) * 14.0
+    mix = scene.slow_mix()
+    clock = scene.time if mix <= 0.0 else scene.drift_time(scene.time)
+    drift = math.sin(clock * (0.08 + 0.12 * mix)) * (26.0 + 22.0 * mix) + math.sin(clock * (0.21 + 0.08 * mix)) * (
+        8.0 + 8.0 * mix
+    )
+    sway = math.cos(clock * (0.06 + 0.10 * mix)) * (14.0 + 12.0 * mix)
     ctx.save()
     ctx.set_operator(cairo.OPERATOR_ADD)
     ctx.save()
     ctx.translate(width * 0.56 + drift, height * 0.42 + sway * 0.4)
-    ctx.rotate(-0.26 + 0.03 * math.sin(scene.time * 0.05))
+    ctx.rotate(-0.26 + 0.03 * math.sin(clock * (0.05 + 0.04 * mix)))
     band_h = (200.0 + 70.0 * low + 24.0 * beat) * (0.85 if height > width else 1.0)
     band = cairo.LinearGradient(0, -band_h, 0, band_h)
     mid = min(0.2, 0.055 + 0.06 * energy + 0.05 * low + 0.07 * beat)
@@ -2163,15 +2320,25 @@ def _paint_stars(ctx, scene: StarScene) -> None:
     ctx.scale(scene.cam_zoom, scene.cam_zoom)
     ctx.translate(-width / 2.0 + scene.cam_x, -height / 2.0 + scene.cam_y)
     _low, high = scene.bands()
+    mix = scene.slow_mix()
+    clock = scene.time if mix <= 0.0 else scene.drift_time(scene.time)
     for x, y, scale, warmth, phase in scene.dust:
         speed = 0.8 + 5.5 * high
-        twinkle = 0.55 + 0.45 * math.sin(scene.time * speed + phase)
+        amp_x, amp_y = 8.0, 5.0
+        freq_x, freq_y = 0.16, 0.11
+        if mix > 0.0:
+            speed = speed + mix * (0.9 + 0.8 * (1.0 - min(1.0, high)))
+            amp_x += 26.0 * mix
+            amp_y += 16.0 * mix
+            freq_x += 0.20 * mix
+            freq_y += 0.14 * mix
+        twinkle = 0.55 + 0.45 * math.sin(clock * speed + phase)
         # Only the brighter specks answer the beat, so the field sparkles instead of flashing white.
         spark = beat * max(0.0, math.sin(phase)) * (1.0 if scale > 0.85 else 0.25)
         tint = _star_tint(warmth)
         alpha = (0.1 + 0.22 * high) * (0.45 + 0.55 * twinkle) + 0.42 * spark
-        drift_x = 8.0 * math.sin(scene.time * 0.16 + phase)
-        drift_y = 5.0 * math.cos(scene.time * 0.11 + warmth * 4.0)
+        drift_x = amp_x * math.sin(clock * freq_x + phase)
+        drift_y = amp_y * math.cos(clock * freq_y + warmth * 4.0)
         ctx.set_source_rgba(tint[0], tint[1], tint[2], min(0.75, alpha))
         ctx.arc(x + drift_x, y + drift_y, (0.6 + scale * 0.5) * (1.0 + 0.8 * spark), 0, math.tau)
         ctx.fill()
@@ -2200,7 +2367,8 @@ def _paint_stars(ctx, scene: StarScene) -> None:
         pop = scene.beat_level() if star.phrase == scene.active_phrase() else 0.18 * scene.beat_level()
         if star.phrase == scene.active_phrase():
             pop = min(1.0, pop + 0.4 * scene.strong_level())
-        _paint_star_glyph(ctx, x, y, level, star.warmth, star.phase, scene.time, star.scale, pop)
+        glyph_time = scene.time if scene.slow_mix() <= 0.0 else scene.drift_time(scene.time)
+        _paint_star_glyph(ctx, x, y, level, star.warmth, star.phase, glyph_time, star.scale, pop)
     ctx.restore()
 
 
@@ -2208,6 +2376,8 @@ def _paint_constellation_lines(ctx, scene: StarScene) -> None:
     ctx.set_line_cap(cairo.LINE_CAP_ROUND)
     beat = scene.beat_level()
     active = scene.active_phrase()
+    mix = scene.slow_mix()
+    clock = scene.time if mix <= 0.0 else scene.drift_time(scene.time)
     for left, right in scene.links:
         a = scene.stars[left]
         b = scene.stars[right]
@@ -2224,7 +2394,8 @@ def _paint_constellation_lines(ctx, scene: StarScene) -> None:
         x2 = ax + (bx - ax) * grow
         y2 = ay + (by - ay) * grow
         hot = beat if a.phrase == active else 0.0
-        alpha = (0.22 + 0.42 * grow + 0.5 * hot) * life
+        breath = 0.0 if mix <= 0.0 else mix * 0.10 * (0.5 + 0.5 * math.sin(clock * 0.7 + a.phase))
+        alpha = (0.22 + 0.42 * grow + 0.5 * hot + breath) * life
         tint = _star_tint((a.warmth + b.warmth) * 0.5)
         ctx.set_source_rgba(tint[0], tint[1], tint[2], min(0.55, alpha * 0.45))
         ctx.set_line_width(2.6 + 2.4 * hot)
@@ -2238,18 +2409,7 @@ def _paint_constellation_lines(ctx, scene: StarScene) -> None:
         ctx.stroke()
 
 
-def _paint_beat_glint(ctx, scene: StarScene) -> None:
-    """One soft light runs the live constellation once per beat."""
-    phrase = scene.active_phrase()
-    if phrase < 0:
-        return
-    chain = [(scene.stars[a], scene.stars[b]) for a, b in scene.links if scene.stars[a].phrase == phrase]
-    if not chain:
-        return
-    age = _since(scene.analysis.beats, scene.time)
-    if age is None or age > 0.32:
-        return
-    u = age / 0.32
+def _glint_point(scene: StarScene, chain, u: float) -> tuple[float, float]:
     slot = u * len(chain)
     index = min(len(chain) - 1, int(slot))
     local = slot - index
@@ -2258,16 +2418,37 @@ def _paint_beat_glint(ctx, scene: StarScene) -> None:
         earlier, later = later, earlier
     ax, ay = scene.placed(earlier)
     bx, by = scene.placed(later)
-    x = ax + (bx - ax) * local
-    y = ay + (by - ay) * local
-    fade = math.sin(math.pi * min(1.0, u))
-    glow = cairo.RadialGradient(x, y, 0.6, x, y, 18.0)
-    glow.add_color_stop_rgba(0.0, 1.0, 1.0, 1.0, 0.95 * fade)
-    glow.add_color_stop_rgba(0.45, 0.8, 0.88, 1.0, 0.35 * fade)
-    glow.add_color_stop_rgba(1.0, 0.7, 0.8, 1.0, 0.0)
-    ctx.set_source(glow)
-    ctx.arc(x, y, 18.0, 0, math.tau)
-    ctx.fill()
+    return ax + (bx - ax) * local, ay + (by - ay) * local
+
+
+def _paint_beat_glint(ctx, scene: StarScene) -> None:
+    """One soft light runs the live constellation once per beat."""
+    phrase = scene.active_phrase()
+    if phrase < 0:
+        return
+    chain = [(scene.stars[a], scene.stars[b]) for a, b in scene.links if scene.stars[a].phrase == phrase]
+    if not chain:
+        return
+    u = scene.glint_u()
+    if u is None:
+        return
+    mix = scene.slow_mix()
+    # A short trail keeps a slow crossing from reading as a dot that hops.
+    if mix <= 0.0:
+        samples = ((u, 1.0),)
+    else:
+        samples = ((max(0.0, u - 0.10), 0.22), (max(0.0, u - 0.05), 0.45), (u, 1.0))
+    for sample, gain in samples:
+        x, y = _glint_point(scene, chain, sample)
+        fade = math.sin(math.pi * min(1.0, sample if mix <= 0.0 else max(sample, u))) * gain
+        radius = 18.0 if gain > 0.9 else 11.0
+        glow = cairo.RadialGradient(x, y, 0.6, x, y, radius)
+        glow.add_color_stop_rgba(0.0, 1.0, 1.0, 1.0, 0.95 * fade)
+        glow.add_color_stop_rgba(0.45, 0.8, 0.88, 1.0, 0.35 * fade)
+        glow.add_color_stop_rgba(1.0, 0.7, 0.8, 1.0, 0.0)
+        ctx.set_source(glow)
+        ctx.arc(x, y, radius, 0, math.tau)
+        ctx.fill()
 
 
 def _paint_phrase_ripple(ctx, scene: StarScene) -> None:
@@ -2277,12 +2458,16 @@ def _paint_phrase_ripple(ctx, scene: StarScene) -> None:
     if len(members) < 1:
         return
     age = _since(scene.analysis.beats, scene.time)
-    if age is None or age > 0.42:
+    window = scene._event_window(scene.time, 0.42, 0.78, 1.10)
+    if age is None or age > window or window <= 0.0:
         return
     cx = sum(scene.placed(star)[0] for star in members) / len(members)
     cy = sum(scene.placed(star)[1] for star in members) / len(members)
     reach = max(math.hypot(scene.placed(star)[0] - cx, scene.placed(star)[1] - cy) for star in members)
-    u = age / 0.42
+    u = age / window
+    mix = scene.slow_mix()
+    if mix > 0.0:
+        u = u + mix * (_smooth(u) - u)
     radius = 8.0 + u * min(100.0, reach + 16.0)
     alpha = 0.42 * (1.0 - u) * (0.65 + 0.35 * scene.strong_level())
     ctx.set_line_width(1.4)
