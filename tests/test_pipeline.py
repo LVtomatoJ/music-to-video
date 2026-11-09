@@ -317,6 +317,12 @@ class PipelineTest(unittest.TestCase):
             self.assertGreaterEqual(_constellation_gap(stars), 24.0)
             self.assertTrue(_stars_answer_a_beat(stars))
             self.assertEqual(stars.timing["max_timing_error_s"], 0.0)
+            self.assertEqual(stars.slow_mix(1.0), 0.0)
+            hit = float(analysis.beats[4])
+            self.assertEqual(stars.beat_level(hit), 1.0)
+            self.assertEqual(stars.beat_level(hit + 0.22), 0.0)
+            self.assertAlmostEqual(stars.beat_level(hit + 0.11), 0.5, places=4)
+            self.assertAlmostEqual(stars.glint_u(hit + 0.16), 0.5, places=4)
         stars = build_scene("stars", 1920, 1080, analysis, 42, "neon")
 
         renderer = CairoRenderer(640, 360, fps=30)
@@ -348,6 +354,66 @@ class PipelineTest(unittest.TestCase):
         renderer = CairoRenderer(640, 360, fps=30)
         rain.update(1 / 30, min(1.0, analysis.duration * 0.5), [])
         self.assertEqual(len(renderer.draw(rain)), 640 * 360 * 4)
+
+    def test_slow_stars_keep_moving_between_beats(self) -> None:
+        analysis = _ballad_analysis()
+        stars = build_scene("stars", 1920, 1080, analysis, 42, "neon")
+        self.assertGreaterEqual(len(stars.stars), 4)
+        self.assertGreater(stars.slow_mix(2.0), 0.9)
+        self.assertLess(stars.pulse_gap(2.0), 1.2)
+        hit = float(analysis.beats[3])
+        gap = stars.pulse_gap(hit)
+        self.assertEqual(stars.beat_level(hit), 1.0)
+        # The rise is already partway up a frame before the hit, and the release
+        # is still lit well after a fast song would have gone dark.
+        self.assertGreater(stars.beat_level(hit - 0.06), 0.55)
+        self.assertGreater(stars.beat_level(hit + 0.22), 0.35)
+        self.assertLess(stars.beat_level(hit + gap * 0.78), 0.2)
+        window = stars._event_window(hit, 0.32, 0.88, 1.25)
+        self.assertGreater(window, gap * 0.7)
+        self.assertLess(window, gap)
+        self.assertAlmostEqual(stars.brightness(stars.stars[0], stars.stars[0].time), 1.0, places=4)
+        live = next(star for star in stars.stars if star.phrase == stars.active_phrase(2.0))
+        on_beat = stars.brightness(live, hit + 0.04)
+        mid = stars.brightness(live, hit + gap * 0.72)
+        self.assertGreater(on_beat, mid + 0.08)
+
+        fps = 30
+        dt = 1.0 / fps
+        beats = [float(beat) for beat in analysis.beats]
+        steps: list[float] = []
+        previous = None
+        for frame in range(int(3.2 * fps)):
+            t0 = 1.0 + frame * dt
+            t1 = t0 + dt
+            sample = t0
+            for beat in beats:
+                if beat >= t1:
+                    break
+                if beat >= t0:
+                    sample = beat
+                    break
+            stars.update(dt, sample, [])
+            if stars.active_phrase() != live.phrase:
+                previous = None
+                continue
+            for star in stars.stars:
+                if stars.life(star.phrase) < 0.2:
+                    continue
+                px, py = stars.placed(star)
+                self.assertGreater(px, 36.0, star.phrase)
+                self.assertLess(px, stars.width - 36.0)
+                self.assertGreater(py, 36.0)
+                self.assertLess(py, stars.height - 36.0)
+            point = stars.placed(live)
+            if previous is not None:
+                steps.append(math.hypot(point[0] - previous[0], point[1] - previous[1]))
+            previous = point
+        self.assertGreater(len(steps), 60)
+        self.assertGreater(sum(steps), 12.0)
+        self.assertLess(max(steps), 2.0)
+        stalls = sum(1 for step in steps if step < 0.05)
+        self.assertLess(stalls / len(steps), 0.12)
 
 
 def _growth_starts_in_frame(city, analysis, fps: int = 30) -> int:
@@ -452,6 +518,29 @@ def _same_key_gaps(scene, step: float = 1.0 / 30.0) -> tuple[int, float, int]:
     if worst > 1e8:
         worst = 0.0
     return overlaps, worst, checked
+
+
+def _ballad_analysis() -> Analysis:
+    """A flat 64 BPM grid with no audio file, so the sky is built from the beats."""
+    bpm = 64.0
+    duration = 12.0
+    period = 60.0 / bpm
+    beats = [index * period for index in range(int(duration / period + 1e-9))]
+    sections = tuple(
+        Section(index * 2.0, min(duration, (index + 1) * 2.0), 0.28, "calm") for index in range(int(duration / 2.0) + 1)
+    )
+    return Analysis(
+        tempo=bpm,
+        beats=beats,
+        strong_beats=beats[1::2],
+        duration=duration,
+        sample_rate=44100,
+        wav_path=Path("/tmp/music2video-no-such-ballad.wav"),
+        sections=sections,
+        rms_times=(0.0, duration),
+        rms=(0.28, 0.28),
+        bands=((0.08,) * 8, (0.08,) * 8),
+    )
 
 
 def _constellation_gap(scene) -> float:
