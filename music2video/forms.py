@@ -1495,6 +1495,8 @@ class StarScene:
     # would hitch a sine; musical flashes still read `time`.
     _drift: float = -1.0
     _weights: dict | None = None
+    # When the next phrase is actually on screen. None until the first query.
+    _ready: dict | None = None
 
     def brightness(self, star: Star, time: float | None = None) -> float:
         when = self.time if time is None else time
@@ -1560,15 +1562,16 @@ class StarScene:
     def slow_mix(self, time: float | None = None) -> float:
         """0 on a fast pulse, 1 when a bar is long enough that a short flash would freeze.
 
-        107 BPM (0.56s) still uses the existing hit. By 67 BPM (0.90s) the picture
-        has eased into the slow drift.
+        110 BPM (0.545s) still uses the existing hit, so a 110–123 BPM song stays
+        crisp. By about 90 BPM (0.66s) the picture is in the slow drift, and the
+        second half of the bar keeps moving. A slower bar stays there.
         """
         gap = self.pulse_gap(time)
-        if gap <= 0.56:
+        if gap <= 0.55:
             return 0.0
-        if gap >= 0.90:
+        if gap >= 0.66:
             return 1.0
-        return _smooth((gap - 0.56) / (0.90 - 0.56))
+        return _smooth((gap - 0.55) / (0.66 - 0.55))
 
     def drift_time(self, when: float) -> float:
         """Clock for continuous motion. A direct query uses `when` unchanged."""
@@ -1639,20 +1642,87 @@ class StarScene:
             return 0.4 * beat + 0.22 * strong
         return 0.1 * beat
 
+    def shown(self, star: Star, time: float | None = None) -> bool:
+        """True once the glyph is drawn. The beat light and the ripple use this."""
+        return self.brightness(star, time) > 0.02
+
+    def lit_edges(self, time: float | None = None) -> list[tuple[Star, Star]]:
+        """Edges the beat light may travel.
+
+        Both stars are on screen, and both notes have arrived by this beat.
+        The path is fixed for the whole crossing, so it does not run into a
+        star that appears later, and it does not jump when one does.
+        """
+        when = self.time if time is None else time
+        phrase = self.active_phrase(when)
+        if phrase < 0:
+            return []
+        age = _since(self.analysis.beats, when)
+        if age is None:
+            return []
+        beat_at = when - age
+        edges: list[tuple[Star, Star]] = []
+        for a, b in self.links:
+            left = self.stars[a]
+            right = self.stars[b]
+            if left.phrase != phrase or right.phrase != phrase:
+                continue
+            if left.time > beat_at + 1e-4 or right.time > beat_at + 1e-4:
+                continue
+            if not self.shown(left, when) or not self.shown(right, when):
+                continue
+            edges.append((left, right))
+        return edges
+
+    def ripple_members(self, time: float | None = None) -> list[Star]:
+        """Stars the beat ring is centered on: the live figure, and only the lit ones."""
+        when = self.time if time is None else time
+        phrase = self.active_phrase(when)
+        if phrase < 0 or self.life(phrase, when) <= 0.2:
+            return []
+        return [star for star in self.stars if star.phrase == phrase and self.shown(star, when)]
+
+    def _successor_ready(self, phrase: int) -> float | None:
+        if self._ready is None:
+            self._ready = self._build_successor_ready()
+        return self._ready.get(phrase)
+
+    def _build_successor_ready(self) -> dict[int, float]:
+        """When the next figure has enough stars to read as a constellation."""
+        spans = self.phrase_span or {}
+        by_phrase: dict[int, list[float]] = {}
+        for star in self.stars:
+            by_phrase.setdefault(star.phrase, []).append(star.time)
+        ordered = sorted((phrase for phrase in spans if by_phrase.get(phrase)), key=lambda phrase: spans[phrase][0])
+        ready: dict[int, float] = {}
+        for prev, nxt in zip(ordered, ordered[1:]):
+            times = sorted(by_phrase[nxt])
+            # A one-star figure counts as soon as it appears. A larger one counts
+            # once a second star is up, so a chorus does not open on a single dot.
+            mark = times[0] if len(times) == 1 else times[1]
+            ready[prev] = mark - 0.22
+        return ready
+
     def life(self, phrase: int, time: float | None = None) -> float:
-        """Older figures ease out. The latest one stays, so the sky is never a frozen poster."""
+        """Older figures ease out. The latest one stays, and so does the one before a rest.
+
+        A phrase does not fade until the next one is actually on screen. Otherwise
+        a long rest leaves the milky way with no constellation, and the chorus
+        opens on a single star.
+        """
         when = self.time if time is None else time
         spans = self.phrase_span or {}
         span = spans.get(phrase)
         if span is None:
             return 1.0
         _start, end = span
-        if phrase == self.latest_phrase():
+        ready = self._successor_ready(phrase)
+        if ready is None:
             return 1.0
-        fade_at = end + 6.5
-        if when <= fade_at:
+        hold = max(end + 6.5, ready)
+        if when <= hold:
             return 1.0
-        return _smooth(1.0 - min(1.0, (when - fade_at) / 2.4))
+        return _smooth(1.0 - min(1.0, (when - hold) / 2.4))
 
     def latest_phrase(self) -> int:
         spans = self.phrase_span or {}
@@ -1782,6 +1852,7 @@ def _build_stars(width: int, height: int, analysis: Analysis, seed: int) -> Star
         tones = [Tone(float(beat), 0.4, 60, "chroma") for beat in analysis.beats] or [Tone(0.0, 0.4, 60, "chroma")]
     tones = _accent_tones(analysis, tones)
     phrases = _group_phrases(tones, analysis)
+    phrases = _company_for_strays(phrases, analysis)
     stars, links = _layout_constellations(phrases, float(width), float(height), rng)
     dust = []
     occupied = [(star.x, star.y) for star in stars]
@@ -1858,6 +1929,34 @@ def _accent_tones(analysis: Analysis, tones: list[Tone]) -> list[Tone]:
     return sorted([*ordered, *extras], key=lambda tone: tone.time)
 
 
+def _company_for_strays(phrases: list[list[Tone]], analysis: Analysis) -> list[list[Tone]]:
+    """A lone star with a long wait grows a short hook on the next beats.
+
+    The beats are already in the song. Without them, that one dot is the whole
+    sky until the next phrase arrives.
+    """
+    beats = [float(hit) for hit in analysis.beats]
+    filled: list[list[Tone]] = []
+    for index, phrase in enumerate(phrases):
+        if len(phrase) != 1:
+            filled.append(list(phrase))
+            continue
+        start = phrase[0].time
+        nxt = phrases[index + 1][0].time if index + 1 < len(phrases) else start + 30.0
+        if nxt - start < 4.0:
+            filled.append(list(phrase))
+            continue
+        extras: list[Tone] = []
+        limit = min(start + 2.4, nxt - 0.5)
+        for hit in beats:
+            if start + 0.25 < hit < limit:
+                extras.append(Tone(float(hit), 0.22, 67, "beat"))
+            if len(extras) >= 3:
+                break
+        filled.append([*phrase, *extras])
+    return filled
+
+
 def _group_phrases(tones: list[Tone], analysis: Analysis, gap: float = 2.7, maxlen: int = 6) -> list[list[Tone]]:
     """A phrase is a short bent figure. A rest can sit inside it; a whole verse cannot."""
     del analysis
@@ -1915,12 +2014,20 @@ def _layout_constellations(phrases: list[list[Tone]], width: float, height: floa
             local = [(x * shrink, y * shrink) for x, y in local]
             radius *= shrink
         pending.append((index, phrase, local, radius))
-    pending.sort(key=lambda item: -item[3])
+    # Wide frames give the largest figure first pick of the sky, as before.
+    # A tall frame seats in time order so the opening phrase can take the lower
+    # band instead of losing it to whichever figure happens to be biggest.
+    portrait = height > width
+    if portrait:
+        pending.sort(key=lambda item: item[0])
+    else:
+        pending.sort(key=lambda item: -item[3])
     placed: list[tuple[float, float, float]] = []
     occupied: list[tuple[float, float]] = []
     seated: dict[int, tuple[tuple[float, float], list[tuple[float, float]]]] = {}
     for index, phrase, local, radius in pending:
-        found = _seat_phrase(local, radius, placed, occupied, width, height, rng)
+        prefer_y = _portrait_band(index, height) if portrait else None
+        found = _seat_phrase(local, radius, placed, occupied, width, height, rng, prefer_y)
         if found is None:
             continue
         origin, points, used_radius = found
@@ -1962,6 +2069,17 @@ def _layout_constellations(phrases: list[list[Tone]], width: float, height: floa
     return stars, links
 
 
+def _portrait_band(index: int, height: float) -> float:
+    """Where a phrase wants to sit in a tall frame.
+
+    Every band is in the lower half, so a long rest still has a figure down in
+    the frame instead of a constellation over an empty well. Adjacent phrases
+    sit on opposite sides and on bands far enough apart that the circles clear.
+    """
+    frac = (0.56, 0.74, 0.88)[index % 3]
+    return frac * height
+
+
 def _seat_phrase(
     local: list[tuple[float, float]],
     radius: float,
@@ -1970,6 +2088,7 @@ def _seat_phrase(
     width: float,
     height: float,
     rng: list[int],
+    prefer_y: float | None = None,
 ) -> tuple[tuple[float, float], list[tuple[float, float]], float] | None:
     """Shrink a figure until it sits inside the frame and clear of the others. Otherwise leave it out."""
     closest = _min_pair(local)
@@ -1978,7 +2097,7 @@ def _seat_phrase(
             continue
         points = [(x * shrink, y * shrink) for x, y in local]
         used = radius * shrink
-        origin = _seat_figure(used, placed, width, height, rng, points, occupied)
+        origin = _seat_figure(used, placed, width, height, rng, points, occupied, prefer_y)
         if origin is None:
             continue
         return origin, points, used
@@ -1993,6 +2112,7 @@ def _seat_figure(
     rng: list[int],
     points: list[tuple[float, float]] | None = None,
     occupied: list[tuple[float, float]] | None = None,
+    prefer_y: float | None = None,
 ) -> tuple[float, float] | None:
     points = points or [(0.0, 0.0)]
     occupied = occupied or []
@@ -2014,15 +2134,27 @@ def _seat_figure(
         nonlocal best, best_clear, best_score
         if not _points_inside(cx, cy, points, width, height, margin):
             return False
+        # A tall frame keeps every figure in the lower half. One that does not
+        # fit is left out, instead of being parked over an empty well.
+        if prefer_y is not None and cy < height * 0.50:
+            return False
         clear = _clearance(cx, cy, radius, placed)
         if clear < 28.0 or not _points_apart(cx, cy, points, occupied, STAR_GAP):
             return False
-        # Among clear seats, walk down the sky so a tall frame does not leave the bottom empty.
-        score = clear - 0.2 * math.hypot(cx - target_x, cy - target_y)
+        if prefer_y is None:
+            # Among clear seats, walk down the sky so a tall frame does not leave the bottom empty.
+            score = clear - 0.2 * math.hypot(cx - target_x, cy - target_y)
+        else:
+            # The band is the point. Clearance is already a gate, so it only breaks ties.
+            score = -abs(cy - prefer_y) - 0.12 * abs(cx - target_x) + 0.03 * min(clear, 400.0)
         if score > best_score:
             best, best_score, best_clear = (cx, cy), score, clear
         return False
 
+    if prefer_y is not None:
+        for x_frac in (0.34, 0.50, 0.66):
+            for y_off in (0.0, -0.05, 0.05, -0.10, 0.10, -0.16, 0.16):
+                consider(width * x_frac, prefer_y + height * y_off)
     for _attempt in range(72):
         cx = margin_x + xorshift32(rng) * (width - 2.0 * margin_x)
         cy = margin_y + xorshift32(rng) * (height - 2.0 * margin_y)
@@ -2422,11 +2554,12 @@ def _glint_point(scene: StarScene, chain, u: float) -> tuple[float, float]:
 
 
 def _paint_beat_glint(ctx, scene: StarScene) -> None:
-    """One soft light runs the live constellation once per beat."""
-    phrase = scene.active_phrase()
-    if phrase < 0:
-        return
-    chain = [(scene.stars[a], scene.stars[b]) for a, b in scene.links if scene.stars[a].phrase == phrase]
+    """One soft light runs the live constellation once per beat.
+
+    Only edges whose stars are already lit. The path is the figure as of this
+    beat, so the light does not travel into stars that have not appeared.
+    """
+    chain = scene.lit_edges()
     if not chain:
         return
     u = scene.glint_u()
@@ -2452,18 +2585,22 @@ def _paint_beat_glint(ctx, scene: StarScene) -> None:
 
 
 def _paint_phrase_ripple(ctx, scene: StarScene) -> None:
-    """A soft ring opens from the live figure on each beat and dies before the next constellation."""
-    phrase = scene.active_phrase()
-    members = [star for star in scene.stars if star.phrase == phrase and scene.life(phrase) > 0.2]
+    """A soft ring opens from the live figure on each beat and dies before the next constellation.
+
+    The center is the stars already on screen. Counting the ones still to come
+    pulls the ring off the figure and into empty sky.
+    """
+    members = scene.ripple_members()
     if len(members) < 1:
         return
     age = _since(scene.analysis.beats, scene.time)
     window = scene._event_window(scene.time, 0.42, 0.78, 1.10)
     if age is None or age > window or window <= 0.0:
         return
-    cx = sum(scene.placed(star)[0] for star in members) / len(members)
-    cy = sum(scene.placed(star)[1] for star in members) / len(members)
-    reach = max(math.hypot(scene.placed(star)[0] - cx, scene.placed(star)[1] - cy) for star in members)
+    points = [scene.placed(star) for star in members]
+    cx = sum(point[0] for point in points) / len(points)
+    cy = sum(point[1] for point in points) / len(points)
+    reach = max(math.hypot(point[0] - cx, point[1] - cy) for point in points)
     u = age / window
     mix = scene.slow_mix()
     if mix > 0.0:

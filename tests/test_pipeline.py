@@ -415,6 +415,174 @@ class PipelineTest(unittest.TestCase):
         stalls = sum(1 for step in steps if step < 0.05)
         self.assertLess(stalls / len(steps), 0.12)
 
+    def test_glint_stays_on_stars_that_are_already_lit(self) -> None:
+        from music2video.forms import _glint_point
+
+        analysis = _tempo_analysis(68, 14)
+        stars = build_scene("stars", 1920, 1080, analysis, 42, "neon")
+        samples = 0
+        partial = 0
+        time = 0.2
+        while time < analysis.duration - 0.05:
+            stars.time = time
+            phrase = stars.active_phrase(time)
+            edges = stars.lit_edges(time)
+            progress = stars.glint_u(time)
+            whole = [
+                (stars.stars[a], stars.stars[b])
+                for a, b in stars.links
+                if stars.stars[a].phrase == phrase
+            ]
+            if progress is not None:
+                samples += 1
+                age = _beat_age(analysis.beats, time)
+                beat_at = time if age is None else time - age
+                for left, right in edges:
+                    self.assertGreater(stars.brightness(left, time), 0.02)
+                    self.assertGreater(stars.brightness(right, time), 0.02)
+                    self.assertLessEqual(left.time, beat_at + 1e-3)
+                    self.assertLessEqual(right.time, beat_at + 1e-3)
+                if edges:
+                    for sample in (progress, max(0.0, progress - 0.10)):
+                        x, y = _glint_point(stars, edges, sample)
+                        self.assertTrue(
+                            any(_near_segment(stars, left, right, x, y, time) for left, right in edges),
+                            (time, sample),
+                        )
+                if whole and len(edges) < len(whole):
+                    partial += 1
+            time += 1.0 / 30.0
+        self.assertGreater(samples, 30)
+        self.assertGreater(partial, 8)
+
+    def test_ripple_centers_on_visible_stars(self) -> None:
+        analysis = _tempo_analysis(68, 14)
+        stars = build_scene("stars", 1920, 1080, analysis, 42, "neon")
+        found = 0
+        time = 0.05
+        while time < analysis.duration - 0.05:
+            phrase = stars.active_phrase(time)
+            members = [star for star in stars.stars if star.phrase == phrase]
+            visible = stars.ripple_members(time)
+            age = _beat_age(analysis.beats, time)
+            window = stars._event_window(time, 0.42, 0.78, 1.10)
+            if (
+                age is not None
+                and age <= window
+                and len(visible) >= 1
+                and len(members) > len(visible)
+            ):
+                vx = sum(stars.placed(star, time)[0] for star in visible) / len(visible)
+                vy = sum(stars.placed(star, time)[1] for star in visible) / len(visible)
+                ax = sum(stars.placed(star, time)[0] for star in members) / len(members)
+                ay = sum(stars.placed(star, time)[1] for star in members) / len(members)
+                self.assertGreater(math.hypot(vx - ax, vy - ay), 18.0, time)
+                # Every star inside the ring's focus is already drawn.
+                for star in visible:
+                    self.assertGreater(stars.brightness(star, time), 0.02)
+                found += 1
+            time += 0.05
+        self.assertGreater(found, 4)
+
+    def test_midtempo_easing_moves_through_the_bar(self) -> None:
+        analysis = _tempo_analysis(90, 16)
+        stars = build_scene("stars", 1920, 1080, analysis, 42, "neon")
+        gap = stars.pulse_gap(4.0)
+        self.assertGreater(gap, 0.64)
+        self.assertLess(gap, 0.70)
+        self.assertGreater(stars.slow_mix(4.0), 0.9)
+        # A bar around 0.66–0.77s (about 78–90 BPM) is in the slow drift.
+        for bpm in (78, 85, 90):
+            sky = build_scene("stars", 1920, 1080, _tempo_analysis(bpm, 10), 42, "neon")
+            self.assertGreater(sky.slow_mix(3.0), 0.9, bpm)
+        # 110–123 BPM keeps the short hit. The second half of the bar does not drift.
+        for bpm in (110, 116, 123):
+            sky = build_scene("stars", 1920, 1080, _tempo_analysis(bpm, 10), 42, "neon")
+            self.assertEqual(sky.slow_mix(3.0), 0.0, bpm)
+            hit = float(sky.analysis.beats[4])
+            self.assertEqual(sky.beat_level(hit + 0.22), 0.0, bpm)
+            self.assertAlmostEqual(sky._event_window(hit, 0.32, 0.88, 1.25), 0.32, places=4)
+
+        steps, second = _drift_steps(stars)
+        self.assertGreater(len(steps), 60)
+        # The attack still moves a couple of pixels in one frame. A hitch would be far larger.
+        self.assertLess(max(steps), 3.5)
+        self.assertGreater(len(second), 30)
+        self.assertGreater(sum(second) / len(second), 0.25)
+        stalls = sum(1 for step in second if step < 0.05)
+        self.assertLess(stalls / len(second), 0.12)
+
+        fast = build_scene("stars", 1920, 1080, _tempo_analysis(120, 12), 42, "neon")
+        _steps, fast_second = _drift_steps(fast, seconds=4.0)
+        self.assertGreater(len(fast_second), 15)
+        self.assertLess(sum(fast_second) / len(fast_second), 0.12)
+
+    def test_a_rest_keeps_a_constellation_up(self) -> None:
+        analysis = _tempo_analysis(90, 28, rest=(8.0, 18.5))
+        for width, height in ((1920, 1080), (1080, 1920)):
+            stars = build_scene("stars", width, height, analysis, 42, "neon")
+            self.assertGreaterEqual(len({star.phrase for star in stars.stars}), 2)
+            empty = 0
+            single = 0
+            frames = 0
+            time = 9.0
+            while time < 19.0:
+                shown = [star for star in stars.stars if stars.brightness(star, time) > 0.02]
+                if not shown:
+                    empty += 1
+                if len(shown) < 2:
+                    single += 1
+                frames += 1
+                time += 0.1
+            self.assertGreater(frames, 50)
+            self.assertEqual(empty, 0, (width, height))
+            self.assertEqual(single, 0, (width, height))
+
+    def test_portrait_sky_uses_the_lower_half(self) -> None:
+        analysis = _tempo_analysis(90, 36)
+        for seed in (1, 7, 42):
+            stars = build_scene("stars", 1080, 1920, analysis, seed, "neon")
+            groups: dict[int, list] = {}
+            for star in stars.stars:
+                groups.setdefault(star.phrase, []).append(star)
+            self.assertGreaterEqual(len(groups), 3, seed)
+            self.assertGreaterEqual(_constellation_gap(stars), 24.0, seed)
+            cents = []
+            earliest = None
+            for members in groups.values():
+                cy = sum(star.y for star in members) / len(members)
+                cents.append(cy)
+                start = min(star.time for star in members)
+                if earliest is None or start < earliest[0]:
+                    earliest = (start, cy)
+            lower = sum(1 for y in cents if y >= stars.height * 0.5)
+            self.assertEqual(lower, len(cents), (seed, [round(y) for y in cents]))
+            piled = sum(1 for y in cents if y < stars.height * 0.22)
+            self.assertEqual(piled, 0, (seed, [round(y) for y in cents]))
+            self.assertGreater(max(cents), stars.height * 0.75, seed)
+            self.assertIsNotNone(earliest)
+            self.assertGreater(earliest[1], stars.height * 0.50, seed)
+
+    def test_a_lone_star_grows_a_small_figure(self) -> None:
+        from music2video.forms import _company_for_strays
+        from music2video.notes import Tone
+
+        analysis = _tempo_analysis(90, 16)
+        stray = [Tone(0.10, 0.2, 60, "pitch")]
+        later = [Tone(12.0, 0.2, 62, "pitch"), Tone(12.67, 0.2, 64, "pitch")]
+        filled = _company_for_strays([stray, later], analysis)
+        self.assertGreaterEqual(len(filled[0]), 3)
+        self.assertLess(filled[0][-1].time, 3.0)
+        self.assertEqual([tone.time for tone in filled[1]], [12.0, 12.67])
+        # A one-star phrase whose neighbor arrives quickly stays one star.
+        close = _company_for_strays(
+            [[Tone(1.0, 0.2, 60, "pitch")], [Tone(3.0, 0.2, 62, "pitch"), Tone(3.6, 0.2, 64, "pitch")]],
+            analysis,
+        )
+        self.assertEqual(len(close[0]), 1)
+        whole = [Tone(index * 0.67, 0.2, 60, "pitch") for index in range(6)]
+        self.assertEqual(len(_company_for_strays([whole], analysis)[0]), 6)
+
 
 def _growth_starts_in_frame(city, analysis, fps: int = 30) -> int:
     """Step like the CLI. Count towers whose body is inside a 10% margin at growth start.
@@ -522,12 +690,26 @@ def _same_key_gaps(scene, step: float = 1.0 / 30.0) -> tuple[int, float, int]:
 
 def _ballad_analysis() -> Analysis:
     """A flat 64 BPM grid with no audio file, so the sky is built from the beats."""
-    bpm = 64.0
-    duration = 12.0
+    return _tempo_analysis(64.0, 12.0, energy=0.28)
+
+
+def _tempo_analysis(
+    bpm: float,
+    duration: float = 16.0,
+    rest: tuple[float, float] | None = None,
+    energy: float = 0.4,
+) -> Analysis:
+    """A flat grid with no audio file. `rest` drops beats, which drops the melody too."""
     period = 60.0 / bpm
-    beats = [index * period for index in range(int(duration / period + 1e-9))]
+    beats: list[float] = []
+    time = 0.0
+    while time < duration - 1e-9:
+        if rest is None or not (rest[0] <= time < rest[1]):
+            beats.append(time)
+        time += period
     sections = tuple(
-        Section(index * 2.0, min(duration, (index + 1) * 2.0), 0.28, "calm") for index in range(int(duration / 2.0) + 1)
+        Section(index * 2.0, min(duration, (index + 1) * 2.0), energy, "verse")
+        for index in range(int(duration / 2.0) + 1)
     )
     return Analysis(
         tempo=bpm,
@@ -535,12 +717,71 @@ def _ballad_analysis() -> Analysis:
         strong_beats=beats[1::2],
         duration=duration,
         sample_rate=44100,
-        wav_path=Path("/tmp/music2video-no-such-ballad.wav"),
+        wav_path=Path(f"/tmp/music2video-no-such-{bpm:.0f}.wav"),
         sections=sections,
         rms_times=(0.0, duration),
-        rms=(0.28, 0.28),
+        rms=(energy, energy),
         bands=((0.08,) * 8, (0.08,) * 8),
     )
+
+
+def _beat_age(beats, now: float) -> float | None:
+    last = None
+    for hit in beats:
+        if hit > now:
+            break
+        last = hit
+    if last is None:
+        return None
+    return now - last
+
+
+def _near_segment(scene, left, right, x: float, y: float, time: float, tol: float = 1.5) -> bool:
+    ax, ay = scene.placed(left, time)
+    bx, by = scene.placed(right, time)
+    dx, dy = bx - ax, by - ay
+    length2 = dx * dx + dy * dy
+    if length2 < 1e-6:
+        return math.hypot(x - ax, y - ay) <= tol
+    along = max(0.0, min(1.0, ((x - ax) * dx + (y - ay) * dy) / length2))
+    return math.hypot(x - (ax + along * dx), y - (ay + along * dy)) <= tol
+
+
+def _drift_steps(scene, seconds: float = 6.0, fps: int = 30) -> tuple[list[float], list[float]]:
+    """Frame steps of the live star, and the subset that falls in the second half of a bar."""
+    dt = 1.0 / fps
+    beats = [float(beat) for beat in scene.analysis.beats]
+    steps: list[float] = []
+    second: list[float] = []
+    previous = None
+    previous_phrase = None
+    for frame in range(int(seconds * fps)):
+        t0 = 1.0 + frame * dt
+        t1 = t0 + dt
+        sample = t0
+        for beat in beats:
+            if beat >= t1:
+                break
+            if beat >= t0:
+                sample = beat
+                break
+        scene.update(dt, sample, [])
+        phrase = scene.active_phrase()
+        if phrase < 0 or scene.life(phrase) < 0.2:
+            previous = None
+            continue
+        gap = scene.pulse_gap()
+        age = _beat_age(beats, scene.time)
+        live = next(star for star in scene.stars if star.phrase == phrase)
+        point = scene.placed(live)
+        if previous is not None and previous_phrase == phrase:
+            step = math.hypot(point[0] - previous[0], point[1] - previous[1])
+            steps.append(step)
+            if age is not None and 0.45 * gap <= age <= 0.92 * gap:
+                second.append(step)
+        previous = point
+        previous_phrase = phrase
+    return steps, second
 
 
 def _constellation_gap(scene) -> float:
